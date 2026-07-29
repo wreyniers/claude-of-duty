@@ -1,0 +1,20 @@
+{
+  "name": "claude-of-duty",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "A browser-native first-person shooter built on Three.js with a AAA-leaning rendering pipeline.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173",
+    "shoot": "node tools/screenshot.mjs"
+  },
+  "dependencies": {
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0",
+    "vite": "^6.0.0"
+  }
+}

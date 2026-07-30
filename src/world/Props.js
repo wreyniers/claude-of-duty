@@ -822,9 +822,9 @@ function paint(hex, chroma = 0.6, gain = 1) {
   return c.lerp(new THREE.Color(gain, gain, gain), 1 - chroma);
 }
 
-// Faded, dusty, low-chroma: every tint here multiplies an already-authored PBR
-// albedo, so anything saturated turns into a toy. The two accent lists (cloth,
-// drums) are the exception and exist on purpose.
+// Earth: faded, dusty, low-chroma, and multiplying an already-authored PBR albedo
+// raw, so anything saturated turns into a toy. Cloth is the accent exception and
+// exists on purpose. The paint palettes below go through paint() instead.
 const SANDBAG_TINTS = [0x9a917c, 0x877e69, 0xa8a08a, 0x736b5a, 0x8f866f];
 const WOOD_TINTS = [0xc9bda6, 0xb0a48c, 0xd6cbb4, 0x9c9280];
 const DEBRIS_TINTS = [0xb9b3a8, 0xa39c90, 0xc6c0b4, 0x8e887e, 0xada38f];

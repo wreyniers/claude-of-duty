@@ -176,6 +176,8 @@ class Game {
       const t0 = performance.now();
       this.engine.render();
       prof.add('@render', performance.now() - t0);
+      prof.add('@render:world+post', this.engine.timings.world);
+      prof.add('@render:viewmodel', this.engine.timings.viewmodel);
       prof.frames++;
     } else {
       for (const sys of this.systems) sys.update?.(t.dt, t.elapsed, this.paused);
@@ -193,7 +195,11 @@ class Game {
     if (this._capturePending) {
       const resolve = this._capturePending;
       this._capturePending = null;
-      resolve(captureFrame(this.engine));
+      const shot = captureFrame(this.engine);
+      // The readback binds framebuffers behind three.js's back; make it re-upload
+      // its state rather than trust a cache that no longer matches the driver.
+      this.renderer.resetState?.();
+      resolve(shot);
     }
   }
 
@@ -204,11 +210,60 @@ class Game {
   }
 }
 
+let snapCanvas = null;
+let snapCtx = null;
+let blitFbo = null;
+let blitRbo = null;
+let blitSize = { w: 0, h: 0 };
+
+/**
+ * Copy the finished frame out through a framebuffer we own.
+ *
+ * Snapshotting the canvas itself — gl.readPixels on the default framebuffer,
+ * drawImage into a 2D canvas, or page.screenshot, which are all the same
+ * underlying path — costs about 104 microseconds per pixel under this sandbox's
+ * SwiftShader build: a hundred seconds for one 1280x720 frame, measured. Blitting
+ * the back buffer into a renderbuffer and reading that instead avoids whatever
+ * that path is doing. Returns bottom-up rows, as readPixels always does.
+ */
+function blitReadback(gl, w, h) {
+  if (!gl.blitFramebuffer) return null;
+  if (!blitFbo || blitSize.w !== w || blitSize.h !== h) {
+    if (blitFbo) {
+      gl.deleteFramebuffer(blitFbo);
+      gl.deleteRenderbuffer(blitRbo);
+    }
+    blitFbo = gl.createFramebuffer();
+    blitRbo = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, blitRbo);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, w, h);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, blitFbo);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, blitRbo);
+    blitSize = { w, h };
+  }
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, blitFbo);
+  gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, blitFbo);
+  const px = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+  return px;
+}
+
 /**
  * Reads back the live frame and reports both the PNG and the statistics the
  * review rubric's tone axis is graded on. Doing the analysis here rather than in
  * Node means it sees the true framebuffer, including whether anything is actually
  * clipping or crushing.
+ *
+ * The frame is snapshotted exactly once, into a 2D canvas, and both the PNG and
+ * the statistics come off that. Do NOT reach for gl.readPixels here: reading the
+ * default framebuffer takes a hundred seconds per frame under this sandbox's
+ * SwiftShader build — measured, not guessed — while the canvas snapshot path
+ * costs about a tenth of a second. It has to happen inside the rAF that drew the
+ * frame either way, since the drawing buffer is not preserved.
  */
 function captureFrame(engine) {
   const canvas = engine.renderer.domElement;
@@ -216,8 +271,38 @@ function captureFrame(engine) {
   const w = gl.drawingBufferWidth;
   const h = gl.drawingBufferHeight;
 
-  const px = new Uint8Array(w * h * 4);
-  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  // Progress is published as each stage begins, not returned at the end: a
+  // capture that never finishes is exactly the case worth diagnosing, and a
+  // return value cannot report that.
+  const t0 = performance.now();
+  const stage = (name) => {
+    window.__captureProgress = { stage: name, elapsed: +(performance.now() - t0).toFixed(1), width: w, height: h };
+  };
+
+  if (!snapCanvas || snapCanvas.width !== w || snapCanvas.height !== h) {
+    snapCanvas = document.createElement('canvas');
+    snapCanvas.width = w;
+    snapCanvas.height = h;
+    snapCtx = snapCanvas.getContext('2d', { willReadFrequently: true, alpha: false });
+  }
+
+  stage('blit');
+  const tRead = performance.now();
+  let px = window.__CAPTURE_VIA_CANVAS ? null : blitReadback(gl, w, h);
+  let path = 'blit';
+  let flipped = true;
+  // A blit that comes back uniformly black means the fast path did not see the
+  // frame; fall back rather than hand a review agent a black image.
+  if (px && px[(h >> 1) * w * 4 + (w >> 1) * 4] === 0 && px[3] === 0 && px[px.length - 2] === 0) px = null;
+  if (!px) {
+    stage('canvasSnapshot');
+    snapCtx.drawImage(canvas, 0, 0);
+    px = snapCtx.getImageData(0, 0, w, h).data;
+    path = 'canvas';
+    flipped = false;
+  }
+  const tStats = performance.now();
+  stage('analyse');
 
   let sum = 0;
   let sumSq = 0;
@@ -246,10 +331,32 @@ function captureFrame(engine) {
     }
   }
   const mean = sum / n;
+  const tEncode = performance.now();
+  stage('encode');
+  if (flipped) {
+    // readPixels hands back bottom-up rows; PNG wants top-down.
+    const img = snapCtx.createImageData(w, h);
+    const dst = img.data;
+    const row = w * 4;
+    for (let y = 0; y < h; y++) {
+      const src = (h - 1 - y) * row;
+      dst.set(px.subarray(src, src + row), y * row);
+    }
+    snapCtx.putImageData(img, 0, 0);
+  }
+  const dataUrl = snapCanvas.toDataURL('image/png');
+  const tDone = performance.now();
+  stage('done');
   return {
-    dataUrl: canvas.toDataURL('image/png'),
+    dataUrl,
     width: w,
     height: h,
+    path,
+    cost: {
+      readback: +(tStats - tRead).toFixed(1),
+      analyse: +(tEncode - tStats).toFixed(1),
+      encode: +(tDone - tEncode).toFixed(1),
+    },
     stats: {
       mean: +mean.toFixed(2),
       stddev: +Math.sqrt(Math.max(0, sumSq / n - mean * mean)).toFixed(2),
@@ -302,6 +409,12 @@ async function main() {
   game.setPaused(true);
   game.start();
 
+  const busLog = [];
+  game.bus.onAny((type, payload) => {
+    if (busLog.length > 400) busLog.shift();
+    busLog.push({ type, t: +game.time.elapsed.toFixed(3), payload: payload && typeof payload === 'object' ? undefined : payload });
+  });
+
   // The screenshot harness drives the game without a real user: it needs a way
   // to unpause and place the camera deterministically.
   window.__harness = {
@@ -330,6 +443,88 @@ async function main() {
     },
     frameStats() {
       return { fps: Math.round(game.time.fps), frame: game.time.frame, ms: +(game.time.dt * 1000).toFixed(1) };
+    },
+
+    // Input injection for the behavioural harness. It writes Input's own state
+    // rather than dispatching DOM events because pointer lock cannot be granted
+    // in headless Chromium, and Input ignores mouse buttons while unlocked.
+    // `pressedThisFrame` is cleared by endFrame, so a set here is seen by exactly
+    // one frame — the same one-frame edge a real key press produces.
+    setAction(name, down) {
+      const code = game.input.bindings[name]?.[0];
+      if (!code) return false;
+      if (down) {
+        game.input.keys.add(code);
+        game.input.pressedThisFrame.add(code);
+      } else {
+        game.input.keys.delete(code);
+        game.input.releasedThisFrame.add(code);
+      }
+      return true;
+    },
+    setMouse(name, down) {
+      game.input.mouse[name] = down;
+      if (down) game.input.mousePressed[name] = true;
+    },
+    look(dx, dy) {
+      game.input._lookX += dx;
+      game.input._lookY += dy;
+    },
+    clearInput() {
+      game.input.keys.clear();
+      game.input.mouse.left = game.input.mouse.right = game.input.mouse.middle = false;
+    },
+
+    // Bus tap for the behavioural harness: it asserts that a subsystem announced
+    // something (a footstep, a shot, a landing) without having to reach inside
+    // that subsystem to check. Bounded so a long run cannot grow without limit.
+    events() {
+      return busLog.slice();
+    },
+    clearEvents() {
+      busLog.length = 0;
+    },
+
+    /**
+     * Everything an automated playtest needs to assert on, in one round trip.
+     * Sim time is reported separately from frame count: under the software
+     * rasteriser a frame retires at most 67ms of simulation, so any assertion
+     * with a duration in it has to be written against `sim`, not frames.
+     */
+    snapshot() {
+      const p = game.player;
+      const w = game.weapons;
+      return {
+        frame: game.time.frame,
+        sim: +game.time.elapsed.toFixed(3),
+        player: p && {
+          position: p.position.toArray().map((v) => +v.toFixed(3)),
+          velocity: p.velocity.toArray().map((v) => +v.toFixed(3)),
+          yaw: +p.yaw.toFixed(3),
+          pitch: +p.pitch.toFixed(3),
+          state: p.state,
+          stance: p.stance,
+          speed: +(p.speed ?? 0).toFixed(3),
+          eyeHeight: +(p.eyeHeight ?? 0).toFixed(3),
+          grounded: !!p.grounded,
+          health: +(p.health ?? 0).toFixed(1),
+          isAds: !!p.isAds,
+          isSprinting: !!p.isSprinting,
+        },
+        weapon: w?.current && {
+          name: w.current.name,
+          ammo: w.current.ammo,
+          reserve: w.current.reserve,
+          magSize: w.current.magSize,
+          fireMode: w.current.fireMode,
+          isReloading: !!w.isReloading,
+          isFiring: !!w.isFiring,
+          adsProgress: +(w.adsProgress ?? 0).toFixed(3),
+        },
+        enemies: (game.ai?.enemies ?? []).length,
+        enemiesAlive: (game.ai?.enemies ?? []).filter((e) => e.alive !== false && (e.health ?? 1) > 0).length,
+        camera: game.camera.position.toArray().map((v) => +v.toFixed(3)),
+      };
     },
     profile() {
       const r = game.profile?.report() ?? null;

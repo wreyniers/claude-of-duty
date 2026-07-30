@@ -5,6 +5,17 @@
 export class EventBus {
   constructor() {
     this._handlers = new Map();
+    this._any = new Set();
+  }
+
+  /**
+   * Observe every event. This exists for the debug overlay and the automated
+   * playtest, which need to assert that a subsystem announced something without
+   * having to enumerate the event names it might use.
+   */
+  onAny(fn) {
+    this._any.add(fn);
+    return () => this._any.delete(fn);
   }
 
   on(type, fn) {
@@ -27,6 +38,9 @@ export class EventBus {
   }
 
   emit(type, payload) {
+    // Observers run before the early-out, or an event with no subscriber would
+    // be invisible to them — which is exactly the case a test wants to see.
+    if (this._any.size) for (const fn of this._any) fn(type, payload);
     const set = this._handlers.get(type);
     if (!set) return;
     for (const fn of set) {

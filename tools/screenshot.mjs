@@ -38,6 +38,11 @@ const PORT = Number(arg('port', 5199));
 const PRESET = arg('preset', '');
 const NO_POST = process.argv.includes('--no-post');
 const BUDGET_MS = Number(arg('budget', 120000));
+// Frames to run before the first capture. TAA and the shadow cascades need a
+// dozen or so to converge; a diagnostic run that only cares about timing can cut
+// it to a handful, which on this box is the difference between a run of minutes
+// and a run of one minute.
+const SETTLE = Number(arg('settle', 40));
 
 /**
  * Each shot is a named camera pose plus optional game-state setup, evaluated in
@@ -202,10 +207,10 @@ async function main() {
     await page.evaluate('window.__harness.deploy()');
     const tSettle = Date.now();
     // Let procedural generation, shadow maps and TAA history settle.
-    await page.evaluate('window.__harness.settle(40)');
+    await page.evaluate(`window.__harness.settle(${SETTLE})`);
     report.timings.settle = Date.now() - tSettle;
     const warm = await page.evaluate('window.__harness.frameStats()');
-    console.log(`[warm] settle40=${report.timings.settle}ms  frame=${warm.frame} ${warm.ms}ms/f ${warm.fps}fps`);
+    console.log(`[warm] settle${SETTLE}=${report.timings.settle}ms  frame=${warm.frame} ${warm.ms}ms/f ${warm.fps}fps`);
     const prof = await page.evaluate('window.__harness.profile()');
     if (prof) {
       report.profile = prof;
@@ -243,14 +248,23 @@ async function main() {
         cap = await page.evaluate('window.__harness.captureResult');
       } catch {
         const fs = await page.evaluate('window.__harness.frameStats()').catch(() => null);
+        const cp = await page.evaluate('window.__captureProgress ?? null').catch(() => null);
+        const where = cp ? ` stalled in capture stage "${cp.stage}" after ${cp.elapsed}ms at ${cp.width}x${cp.height}` : '';
         report.errors.push(
           `shot "${shot.name}" produced no frame within ${BUDGET_MS}ms` +
-            (fs ? ` (last frame ${fs.frame}, ${fs.ms}ms, ${fs.fps}fps)` : ' (page unresponsive)')
+            (fs ? ` (last frame ${fs.frame}, ${fs.ms}ms, ${fs.fps}fps)` : ' (page unresponsive)') +
+            where
         );
-        console.log(`[shot] ${shot.name.padEnd(12)} STALLED after ${BUDGET_MS}ms${fs ? ` — frame ${fs.frame} @ ${fs.ms}ms` : ''}`);
+        console.log(`[shot] ${shot.name.padEnd(12)} STALLED after ${BUDGET_MS}ms${fs ? ` — frame ${fs.frame} @ ${fs.ms}ms` : ''}${where}`);
         continue;
       }
       report.timings[`capture:${shot.name}`] = Date.now() - t0;
+      if (cap.cost) {
+        report.timings[`captureCost:${shot.name}`] = cap.cost;
+        console.log(
+          `[cap ] ${shot.name.padEnd(12)} wall=${report.timings[`capture:${shot.name}`]}ms  via=${cap.path} readback=${cap.cost.readback} analyse=${cap.cost.analyse} encode=${cap.cost.encode}`
+        );
+      }
       await writeFile(file, Buffer.from(cap.dataUrl.split(',')[1], 'base64'));
 
       const stats = await page.evaluate(() => {

@@ -55,6 +55,10 @@ export class Engine {
     this.postfx = null; // installed by PostFX
     this.size = new THREE.Vector2(1, 1);
     this.drawingSize = new THREE.Vector2(1, 1);
+    // Split of the frame's GPU cost. Under a software rasteriser the driver calls
+    // are synchronous CPU work, so wall-clock here is real and worth having: it
+    // is the only way to tell a slow post chain from a slow world pass.
+    this.timings = { world: 0, viewmodel: 0 };
 
     this._onResize = () => this.resize();
     window.addEventListener('resize', this._onResize);
@@ -111,6 +115,7 @@ export class Engine {
     this.viewmodelCamera.position.copy(this.camera.position);
     this.viewmodelCamera.quaternion.copy(this.camera.quaternion);
 
+    const t0 = performance.now();
     if (this.postfx?.enabled) {
       this.postfx.render();
     } else {
@@ -118,12 +123,16 @@ export class Engine {
       r.clear();
       r.render(this.scene, this.camera);
     }
+    const t1 = performance.now();
 
     // Weapon pass: keep the colour buffer, throw away depth.
     r.autoClear = false;
     r.clearDepth();
     r.render(this.viewmodelScene, this.viewmodelCamera);
     r.autoClear = true;
+
+    this.timings.world = t1 - t0;
+    this.timings.viewmodel = performance.now() - t1;
   }
 
   dispose() {

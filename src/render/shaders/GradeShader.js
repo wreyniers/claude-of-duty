@@ -82,6 +82,15 @@ export const GradeShader = {
     uTexel: { value: null }, // set by PostFX to a shared Vector2
     uTime: { value: 0 },
 
+    // Light shafts arrive as radiance, not as a layer: PostFX hands over the
+    // accumulated sun-occlusion buffer and this pass adds it in before exposure
+    // so it goes through the tone curve with everything else.
+    tShaft: { value: null },
+    tDepth: { value: null },
+    uShaft: { value: 0 },
+    uShaftPath: { value: 1 / 45 }, // 1/metres; the depth over which airlight saturates
+    uCamPlanes: { value: null },
+
     uExposure: { value: 1 },
     uContrast: { value: 1.18 },
     uSaturation: { value: 1.07 },
@@ -115,6 +124,12 @@ varying vec2 vUv;
 uniform sampler2D tDiffuse;
 uniform vec2 uTexel;
 uniform float uTime;
+
+uniform sampler2D tShaft;
+uniform sampler2D tDepth;
+uniform float uShaft;
+uniform float uShaftPath;
+uniform vec2 uCamPlanes;
 
 uniform float uExposure;
 uniform float uContrast;
@@ -178,8 +193,8 @@ vec3 toSRGB( vec3 c ) {
  * grade, and in a single pass that means grading three separately offset samples
  * and keeping one channel from each.
  */
-vec3 gradeAt( vec2 uv ) {
-	vec3 c = max( texture2D( tDiffuse, uv ).rgb, 0.0 ) * uExposure;
+vec3 gradeAt( vec2 uv, vec3 inscatter ) {
+	vec3 c = ( max( texture2D( tDiffuse, uv ).rgb, 0.0 ) + inscatter ) * uExposure;
 
 	// Split toning before the curve, so the tint rides the scene's own falloff
 	// instead of sitting on top of the print as a flat wash.
@@ -224,7 +239,18 @@ void main() {
 	// 1.0 at the edge midpoints, 1.414 in the corners.
 	float rn = length( fromCentre ) * 2.0;
 
-	vec3 col = gradeAt( vUv );
+	// In-scattered sunlight is proportional to how much air the eye ray crossed
+	// before it hit something, which is what keeps the shafts off near geometry:
+	// a surface two metres away has almost no air in front of it, the far band and
+	// the sky have all of it. Same reasoning as the aerial term in Sky, same shape.
+	vec3 shaft = vec3( 0.0 );
+	if ( uShaft > 0.0 ) {
+		float d = texture2D( tDepth, vUv ).x;
+		float dist = ( uCamPlanes.x * uCamPlanes.y ) / ( uCamPlanes.y - ( uCamPlanes.y - uCamPlanes.x ) * d );
+		shaft = texture2D( tShaft, vUv ).rgb * uShaft * ( 1.0 - exp( -dist * uShaftPath ) );
+	}
+
+	vec3 col = gradeAt( vUv, shaft );
 
 	// Radial chromatic aberration, strictly outside the central 70% of the
 	// radius: real lenses are corrected on axis, and CA over the whole frame is
@@ -233,8 +259,8 @@ void main() {
 	if ( caW > 0.002 ) {
 		vec2 dir = fromCentre / max( length( fromCentre ), 1e-5 );
 		vec2 off = dir * caW * 0.0019;
-		col.r = gradeAt( vUv + off ).r;
-		col.b = gradeAt( vUv - off ).b;
+		col.r = gradeAt( vUv + off, shaft ).r;
+		col.b = gradeAt( vUv - off, shaft ).b;
 	}
 
 	// Vignette. Optical falloff is smooth and starts well inside the frame; a

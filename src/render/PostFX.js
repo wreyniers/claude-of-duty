@@ -34,6 +34,7 @@ import { MotionBlurShader, VELOCITY_GLSL } from './shaders/MotionBlurShader.js';
  *   TAA             jitter accumulate + neighbourhood-clamped history
  *   motion blur     camera velocity from depth + last frame's view-projection
  *   bloom           high threshold, five mips, low intensity
+ *   light shafts    reduced-res sun occlusion, added back inside the grade
  *   grade           ACES RRT+ODT, grading, CA, vignette, grain, sharpen, sRGB
  *   SMAA            morphological AA on the finished LDR frame
  *
@@ -251,6 +252,100 @@ void main() {
 };
 
 /**
+ * Light shafts, as the airlight that survived being shadowed.
+ *
+ * A true volumetric would march the shadow cascades along every view ray, which
+ * on a software rasteriser is not affordable at any resolution worth reviewing.
+ * What the depth buffer already knows is whether the straight screen-space line
+ * from a pixel toward the sun's vanishing point is blocked — and that line *is*
+ * the projection of the sun's shadow volume, because everything radially outward
+ * from the sun behind an occluder is exactly what that occluder shadows.
+ * Accumulating the sky's own radiance along it therefore measures how much of the
+ * air in front of this pixel is still lit, which is the quantity crepuscular rays
+ * are made of. Occlusion is the mask; nothing else gates the effect.
+ *
+ * Two things stop it becoming the whole-frame glow that gives this technique
+ * away. It is confined to a forward-scatter lobe around the sun instead of being
+ * applied uniformly, and the grade weights it by the pixel's own distance, so a
+ * wall two metres from the eye picks up almost none of it. Radiance per tap is
+ * clamped because the sun disc is authored near 190 and one tap on it would fire
+ * a ray brighter than the frame.
+ */
+const LightShaftShader = {
+  name: 'LightShaftShader',
+  defines: { SAMPLES: 16 },
+  uniforms: {
+    tDiffuse: { value: null },
+    tDepth: { value: null },
+    uSunUv: { value: null },
+    uAspect: { value: 16 / 9 },
+    uFalloff: { value: 3.1 },
+    uDecay: { value: 0.94 },
+    uDensity: { value: 1.0 },
+    uMaxRadiance: { value: 3.0 },
+    uSeed: { value: 0 },
+  },
+  vertexShader: /* glsl */ `
+varying vec2 vUv;
+void main() {
+	vUv = uv;
+	gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+}
+`,
+  fragmentShader: /* glsl */ `
+varying vec2 vUv;
+
+uniform sampler2D tDiffuse;
+uniform sampler2D tDepth;
+uniform vec2 uSunUv;
+uniform float uAspect;
+uniform float uFalloff;
+uniform float uDecay;
+uniform float uDensity;
+uniform float uMaxRadiance;
+uniform float uSeed;
+
+float hash21( vec2 p ) {
+	p = fract( p * vec2( 123.34, 456.21 ) );
+	p += dot( p, p + 45.32 );
+	return fract( p.x * p.y );
+}
+
+void main() {
+	vec2 delta = uSunUv - vUv;
+	// Mie forward scattering is a lobe, not a hemisphere: away from the sun there
+	// is nothing for a shaft to be made of.
+	float lobe = exp( -length( delta * vec2( uAspect, 1.0 ) ) * uFalloff );
+	if ( lobe < 0.003 ) { gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
+
+	vec2 stepUv = delta * ( uDensity / float( SAMPLES ) );
+	// A fixed tap set leaves concentric rings around the sun; jittering the start
+	// turns them into noise the grain pass then buries.
+	vec2 uv = vUv + stepUv * hash21( gl_FragCoord.xy + uSeed );
+
+	vec3 acc = vec3( 0.0 );
+	float w = 1.0;
+	float wsum = 0.0;
+
+	for ( int i = 0; i < SAMPLES; i ++ ) {
+		vec2 s = clamp( uv, vec2( 0.0 ), vec2( 1.0 ) );
+		// Cleared depth is the only value in the buffer that means "no geometry
+		// between this point and the atmosphere".
+		float sky = step( 0.999995, texture2D( tDepth, s ).x );
+		acc += ( w * sky ) * min( texture2D( tDiffuse, s ).rgb, vec3( uMaxRadiance ) );
+		wsum += w;
+		// Weighting the near taps hardest keeps a shaft attached to the silhouette
+		// that cast it instead of streaking the full radius uniformly.
+		w *= uDecay;
+		uv += stepUv;
+	}
+
+	gl_FragColor = vec4( acc * ( lobe / max( wsum, 1e-4 ) ), 1.0 );
+}
+`,
+};
+
+/**
  * Renders the world into a target this module owns, then blits the result into
  * the composer's read buffer. See DEPTH ISOLATION above for why the blit exists.
  */
@@ -368,6 +463,64 @@ class TemporalAAPass extends Pass {
 }
 
 /**
+ * The shaft accumulation, into a target of its own that the grade samples.
+ *
+ * It does not swap the composer's buffers: the shafts are radiance to be added
+ * back in *before* the tone curve, so the grade adds them at its own first line
+ * rather than a compositing pass laying them over a finished frame. That also
+ * costs one full-screen pass less on a box where every one of them is a second
+ * of wall clock. The accumulation itself runs at a fraction of the frame because
+ * a shaft is a low-frequency signal; the taps still read the full-resolution
+ * depth and colour, so the mask is supersampled rather than blurred.
+ */
+class LightShaftPass extends Pass {
+  constructor(width, height, scale, samples) {
+    super();
+    this.needsSwap = false;
+    this._resScale = scale;
+
+    this.target = new THREE.WebGLRenderTarget(
+      Math.max(1, Math.round(width * scale)),
+      Math.max(1, Math.round(height * scale)),
+      { type: THREE.HalfFloatType, colorSpace: THREE.LinearSRGBColorSpace, depthBuffer: false, stencilBuffer: false }
+    );
+    this.target.texture.name = 'PostFX.shafts';
+
+    this.material = new THREE.ShaderMaterial({
+      name: LightShaftShader.name,
+      defines: { SAMPLES: samples },
+      uniforms: THREE.UniformsUtils.clone(LightShaftShader.uniforms),
+      vertexShader: LightShaftShader.vertexShader,
+      fragmentShader: LightShaftShader.fragmentShader,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.NoBlending,
+    });
+    this.uniforms = this.material.uniforms;
+    this._quad = new FullScreenQuad(this.material);
+  }
+
+  render(renderer, writeBuffer, readBuffer) {
+    this.uniforms.tDiffuse.value = readBuffer.texture;
+    renderer.setRenderTarget(this.target);
+    this._quad.render(renderer);
+  }
+
+  setSize(width, height) {
+    this.target.setSize(
+      Math.max(1, Math.round(width * this._resScale)),
+      Math.max(1, Math.round(height * this._resScale))
+    );
+  }
+
+  dispose() {
+    this.target.dispose();
+    this.material.dispose();
+    this._quad.dispose();
+  }
+}
+
+/**
  * GTAO at a fraction of the frame resolution. AO is a low-frequency signal and
  * the pass is by far the most sample-hungry thing in the chain, so on a software
  * rasteriser it is the first thing that should give ground.
@@ -418,6 +571,14 @@ export class PostFX {
     this.baseExposure = 2.15;
     this.gradeName = 'default';
 
+    /**
+     * Peak shaft radiance as a fraction of the sky's own, before the distance
+     * weighting. Small on purpose: the visible signal is the *contrast* between a
+     * lit path and a shadowed one, and that contrast is already the full value,
+     * so anything larger buys a glow around the sun rather than sharper rays.
+     */
+    this.shaftStrength = 0.15;
+
     this.composer = null;
     this.sceneTarget = null;
     this.depthTexture = null;
@@ -426,10 +587,11 @@ export class PostFX {
     this.taa = null;
     this.motionBlur = null;
     this.bloom = null;
+    this.shafts = null;
     this.gradePass = null;
     this.smaa = null;
 
-    this.stats = { initMs: 0, passes: 0, ao: false, ssr: false, taa: false, smaa: false, bloom: false, mb: false };
+    this.stats = { initMs: 0, passes: 0, ao: false, ssr: false, taa: false, smaa: false, bloom: false, mb: false, shafts: false };
 
     // Shared uniform values. The same objects are bound into several passes so one
     // write per frame reaches all of them; update() must not allocate.
@@ -444,6 +606,9 @@ export class PostFX {
     this._gamma = new THREE.Vector3(1, 1, 1);
     this._gain = new THREE.Vector3(1, 1, 1);
     this._hurtTint = new THREE.Vector3(0.85, 0.06, 0.05);
+    this._sunUv = new THREE.Vector2(0.5, 0.5);
+    this._sunClip = new THREE.Vector4();
+    this._camPlanes = new THREE.Vector2(0.08, 900);
 
     this._projClean = new THREE.Matrix4();
     this._viewProjClean = new THREE.Matrix4();
@@ -533,17 +698,20 @@ export class PostFX {
 
     if (settings.ao) {
       // Radius in metres. The default 0.25 is tuned for a desk-scale demo; at a
-      // 1.8 m eye height that darkens nothing but the seam itself, so corners
-      // where a wall meets a floor need something closer to half a metre.
+      // 1.8 m eye height that darkens nothing but the seam itself. The scale that
+      // matters here is architectural — a doorway reveal, the underside of a
+      // balcony, the corner where two walls meet — so the radius has to be a
+      // fraction of a room, and `thickness` has to grow with it or a railing
+      // starts occluding the wall a metre behind it.
       const ao = new ScaledGTAOPass(scene, camera, w, h, software ? 0.7 : 1);
       // Reuse the scene depth instead of re-rendering the world into a private
       // G-buffer: one less full-scene pass, and the normals derived from this
       // depth are the same ones SSR and motion blur reason about.
       ao.setGBuffer(this.depthTexture);
       ao.updateGtaoMaterial({
-        radius: 0.55,
+        radius: 0.9,
         distanceExponent: 1.0,
-        thickness: 0.6,
+        thickness: 0.85,
         distanceFallOff: 1.0,
         scale: 1.05,
         samples: software ? 12 : 16,
@@ -603,10 +771,26 @@ export class PostFX {
       this.composer.addPass(bloom);
     }
 
+    // Shafts need the sun to be occluded by something, which means they need the
+    // depth buffer; without it the chain has no way to know what is in shadow.
+    if (wantsDepth && settings.volumetrics) {
+      // Software rasterisers pay per tap, and the mask is the one part of the
+      // chain whose output is smooth enough to survive being run small.
+      const shafts = new LightShaftPass(w, h, software ? 0.25 : 0.34, software ? 14 : 20);
+      shafts.uniforms.tDepth.value = this.depthTexture;
+      shafts.uniforms.uSunUv.value = this._sunUv;
+      shafts.uniforms.uAspect.value = w / h;
+      this.shafts = shafts;
+      this.composer.addPass(shafts);
+    }
+
     const grade = new ShaderPass(GradeShader);
     grade.material.depthTest = false;
     grade.material.depthWrite = false;
     grade.uniforms.uTexel.value = this._texel;
+    grade.uniforms.tShaft.value = this.shafts ? this.shafts.target.texture : null;
+    grade.uniforms.tDepth.value = this.depthTexture;
+    grade.uniforms.uCamPlanes.value = this._camPlanes;
     grade.uniforms.uShadowTint.value = this._shadowTint;
     grade.uniforms.uHighTint.value = this._highTint;
     grade.uniforms.uSplit.value = this._split;
@@ -630,6 +814,7 @@ export class PostFX {
     this.stats.smaa = !!this.smaa;
     this.stats.bloom = !!this.bloom;
     this.stats.mb = !!this.motionBlur;
+    this.stats.shafts = !!this.shafts;
     this._hasPrev = false;
   }
 
@@ -723,6 +908,50 @@ export class PostFX {
     u.uSharpen.value = (s.sharpen ?? 0.6) * 0.5 * n.sharpen;
   }
 
+  /**
+   * Point the shaft pass at the sun and decide how much of it survives.
+   *
+   * A directional light has no position to project, but it does have a vanishing
+   * point: transform the *direction* (w = 0) and the perspective divide lands on
+   * the pixel every parallel sun ray converges toward. Behind the camera that
+   * point is meaningless, and far enough off-frame the radial direction stops
+   * agreeing with the real shadow volume, so both fade the effect out rather than
+   * snapping it off — a shaft that vanishes on a pan reads as a bug.
+   */
+  _updateShafts() {
+    const grade = this.gradePass;
+    if (!grade) return;
+    const dir = this.game.sky?.sunDirection;
+    if (!this.shafts || !dir) {
+      grade.uniforms.uShaft.value = 0;
+      return;
+    }
+
+    this._camPlanes.set(this.game.camera.near, this.game.camera.far);
+
+    this._sunClip.set(dir.x, dir.y, dir.z, 0).applyMatrix4(this._viewProjClean);
+    const w = this._sunClip.w;
+    if (w > 1e-4) {
+      const nx = this._sunClip.x / w;
+      const ny = this._sunClip.y / w;
+      this._sunUv.set(nx * 0.5 + 0.5, ny * 0.5 + 0.5);
+      const off = Math.max(Math.abs(nx), Math.abs(ny));
+      // Below the horizon there is no direct beam left to be occluded.
+      const daylight = THREE.MathUtils.clamp(dir.y * 12, 0, 1);
+      const s = this.shaftStrength * daylight * (1 - THREE.MathUtils.smoothstep(off, 1.0, 2.4));
+      this.shafts.enabled = s > 0.002;
+      grade.uniforms.uShaft.value = s;
+    } else {
+      this.shafts.enabled = false;
+      grade.uniforms.uShaft.value = 0;
+    }
+
+    if (this.shafts.enabled) {
+      this.shafts.uniforms.uAspect.value = this._size.x / this._size.y;
+      this.shafts.uniforms.uSeed.value = (this._grainTime * 61) % 1000;
+    }
+  }
+
   /* ------------------------------------------------------------------ render */
 
   render() {
@@ -755,6 +984,7 @@ export class PostFX {
     this._reproject.multiplyMatrices(this._hasPrev ? this._prevViewProj : this._viewProjClean, this._invViewProj);
 
     if (this.ssr) this._viewUp.set(0, 1, 0).transformDirection(camera.matrixWorldInverse);
+    this._updateShafts();
 
     if (this.motionBlur) {
       const mb = this.motionBlur;
@@ -842,6 +1072,7 @@ export class PostFX {
     this.taa = null;
     this.motionBlur = null;
     this.bloom = null;
+    this.shafts = null;
     this.gradePass = null;
     this.smaa = null;
   }

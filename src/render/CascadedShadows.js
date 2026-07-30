@@ -11,6 +11,7 @@ import { LAYER_WORLD } from '../core/Layers.js';
  *   update(camera, sunDir)  refit + snap every cascade for this frame
  *   patchMaterial(mat)      inject cascade select + PCSS into a lit material
  *   setCascadeCount(n) / setShadowDistance(m) / setDebug(bool)
+ *   setSkyVisibility(soffit, open, power)  diffuse-IBL orientation weight
  *   stats             : { renders, refits, cascades }
  *
  * HOW IT WORKS
@@ -52,6 +53,9 @@ const DEBUG_TINT = [
 const CHUNK = 'lights_fragment_begin';
 const DIR_BLOCK_START = '#if ( NUM_DIR_LIGHTS > 0 ) && defined( RE_Direct )';
 const DIR_BLOCK_END = '#if ( NUM_RECT_AREA_LIGHTS > 0 ) && defined( RE_Direct_RectArea )';
+
+const MAPS_CHUNK = 'lights_fragment_maps';
+const IBL_DIFFUSE_LINE = 'iblIrradiance += getIBLIrradiance( geometryNormal );';
 
 export class CascadedShadows {
   constructor(game, opts = {}) {
@@ -100,6 +104,29 @@ export class CascadedShadows {
       // Ceiling on the slope-scaled bias, in metres. Without it the far cascades'
       // coarse texels ask for a metre of bias and the shadow slides off its owner.
       uCsmBiasMax: { value: new THREE.Vector4(0.05, 0.08, 0.14, 0.2) },
+      /**
+       * Sky visibility for the *diffuse* half of the IBL: (soffit, open sky,
+       * falloff exponent), evaluated against Three's own hemisphere weight
+       * `0.5 + 0.5 * worldNormal.y`.
+       *
+       * Sky's env cube is a dome and nothing else — no buildings, no ground
+       * geometry, and its below-horizon band is 0.4x the horizon radiance, which
+       * is brighter than paving reflects. So every surface in a walled square is
+       * handed the irradiance of an unobstructed field, and at golden hour that
+       * is worse than merely too much: the dome's brightest band is the horizon,
+       * so the integral over a *vertical* normal's hemisphere came out 1.36x the
+       * one over a horizontal normal. Measured on this preset it delivered 1.007
+       * to a wall against 1.006 to the floor and 0.778 to a soffit — an inverted,
+       * near-isotropic fill that cancelled the hemisphere light's orientation
+       * step and left every surface in one band whatever way it faced.
+       *
+       * Occluding the diffuse integral and not the specular lobe is the honest
+       * split rather than a convenience: a mirror direction is one ray that for a
+       * visible surface mostly escapes, while the diffuse term is the whole
+       * hemisphere, which is exactly what the geometry we do not put in the cube
+       * blocks. It also costs nothing on the reflections the metals need.
+       */
+      uCsmSkyVis: { value: new THREE.Vector3(0.21, 0.62, 3.2) },
       uCsmDebug: { value: 0 },
     };
 
@@ -107,6 +134,7 @@ export class CascadedShadows {
     this._glslKey = '';
     this._parsGlsl = '';
     this._dirGlsl = '';
+    this._mapsGlsl = '';
     this._warned = false;
 
     this._fits = [];
@@ -207,6 +235,11 @@ export class CascadedShadows {
     this.uniforms.uCsmDebug.value = on ? 1 : 0;
   }
 
+  /** Uniform-only, so no recompile: safe to drive from a settings change. */
+  setSkyVisibility(soffit, open, power) {
+    this.uniforms.uCsmSkyVis.value.set(soffit, open, power);
+  }
+
   /* ------------------------------------------------------------ shader side */
 
   _buildGlsl() {
@@ -227,7 +260,16 @@ float csmFilter${taps}( sampler2D map, vec3 co, float radius, float mapSize, flo
 	return sum * ${(1 / taps).toFixed(6)};
 }`;
 
+    // Outside the shadow-map guards: an unlit-by-shadows material still receives
+    // the env map, so it still needs the weight, and the uniform has to be
+    // declared wherever the function is.
     let src = `
+uniform vec3 uCsmSkyVis;
+float csmSkyVisibility( float worldNy ) {
+	float w = clamp( 0.5 + 0.5 * worldNy, 0.0, 1.0 );
+	return mix( uCsmSkyVis.x, uCsmSkyVis.y, pow( w, uCsmSkyVis.z ) );
+}
+
 #ifdef USE_SHADOWMAP
 #if NUM_DIR_LIGHT_SHADOWS >= ${n}
 #define CSM_ACTIVE
@@ -334,6 +376,16 @@ float csmShadow( vec3 nrm, vec3 ldir, float depth ) {
     const a = chunk.indexOf(DIR_BLOCK_START);
     const b = chunk.indexOf(DIR_BLOCK_END);
     this._dirGlsl = a > 0 && b > a ? chunk.slice(0, a) + DIR_LIGHT_BLOCK + chunk.slice(b) : '';
+
+    // Rewrite the one line rather than restate the chunk, so a Three release that
+    // adds a lightmap or anisotropy branch to it keeps working.
+    const maps = THREE.ShaderChunk[MAPS_CHUNK];
+    this._mapsGlsl = maps.includes(IBL_DIFFUSE_LINE)
+      ? maps.replace(
+          IBL_DIFFUSE_LINE,
+          'iblIrradiance += getIBLIrradiance( geometryNormal ) * csmSkyVisibility( inverseTransformDirection( geometryNormal, viewMatrix ).y );'
+        )
+      : '';
   }
 
   /**
@@ -364,6 +416,9 @@ float csmShadow( vec3 nrm, vec3 ldir, float depth ) {
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <shadowmap_pars_fragment>', `#include <shadowmap_pars_fragment>\n${this._parsGlsl}`)
         .replace(`#include <${CHUNK}>`, this._dirGlsl);
+      if (this._mapsGlsl) {
+        shader.fragmentShader = shader.fragmentShader.replace(`#include <${MAPS_CHUNK}>`, this._mapsGlsl);
+      }
     };
     // onBeforeCompile is invisible to Three's program cache, so a patched and an
     // otherwise identical unpatched material would share one program.

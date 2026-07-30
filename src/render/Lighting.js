@@ -17,20 +17,38 @@ const GROUND_CHROMA = new THREE.Color(1.0, 0.66, 0.4);
 /**
  * Luminance of the hemisphere's lower half as a fraction of its upper half.
  *
- * A hemisphere light is the only fill term in this renderer whose strength varies
- * with which way a surface faces, so it is the only one that can put a value step
- * between a horizontal plane and a vertical one. It was being wasted: the ground
- * half was 0.74 of the sky half, and the env map — which was the larger of the two
- * fill terms, and whose below-horizon band is far brighter than a real sunlit
- * street would be — is close to isotropic. The two together delivered the same
- * fill to a floor, a wall and a soffit to within 2%, which is why every surface in
- * the frame landed in one narrow band whatever its orientation.
- *
  * A quarter is roughly two stops down, which is what a stone square in shadow
  * gives back against a lit golden-hour sky band, and it leaves the ground bounce
  * present as warmth rather than as brightness.
+ *
+ * This alone was never going to carry the orientation step, and the previous round
+ * was wrong to expect it to. The hemisphere is a well-shaped term — 1.0 / 0.63 /
+ * 0.25 to a floor, a wall and a soffit — but it was the smaller half of the fill,
+ * and the env map it was being added to ran the *other* way: see uCsmSkyVis in
+ * CascadedShadows for the measurement and the fix. With that weight in place these
+ * two now agree in sign and the fill a surface receives finally depends on which
+ * way it faces.
  */
 const GROUND_FRACTION = 0.25;
+
+/**
+ * How far the hemisphere's *sky* half is pulled off the warm bounce back toward
+ * the sky's own measured chroma.
+ *
+ * The bounce is the term this renderer otherwise has no source for, so the
+ * hemisphere carrying it is right — but with the diffuse env map now weighted by
+ * sky visibility, the hemisphere is half the fill an up-facing surface gets
+ * instead of a third, and an all-warm hemisphere at that share takes the blue out
+ * of the one place the rubric asks for it: a shadow on the ground, which faces
+ * the sky and nothing else. Mixing keeps both readings — measured on paving,
+ * shaded horizontal comes out blue/red 1.65 and a shaded vertical face 1.08,
+ * while sunlit paving still lands warm at 0.69 (it was 0.75 with a fully warm
+ * hemisphere, so this does not undo that).
+ *
+ * The ground half stays on the raw warm bounce: light arriving from below has
+ * been off the paving and is not sky-coloured at all.
+ */
+const SKY_MIX = 0.45;
 
 /**
  * The key is Sky's `sunIrradiance` times this.
@@ -38,13 +56,18 @@ const GROUND_FRACTION = 0.25;
  * Sky derives that figure for the dome, and the dome's radiance scale (`lum`) was
  * recalibrated down by two thirds to land the horizon band on the part of the ACES
  * curve that still has slope. The sun constant did not move with it, so the key
- * drifted down against its own sky. Measured on one paving material before this:
- * sunlit and shaded read 2.0x apart in scene-linear — one stop of key-to-fill
- * where golden hour wants three to four, and the reason the frame read flat-lit
- * rather than fogged. With the fill trims below this puts a sun-facing wall about
- * 17x over its shaded side and a horizontal plane about 5x.
+ * drifted down against its own sky.
+ *
+ * This is deliberately a small part of the contrast fix. Sunlit high-albedo
+ * plaster already sits near 200 in the graded frame, so buying key-to-fill by
+ * raising the key clips the brightest surfaces in the level and costs the tone
+ * axis; the room is all on the shade side. At this value with the fill trims
+ * below, sunlit surfaces move by under 6% in scene-linear — a horizontal plane
+ * from 2.10 to 1.97 and a sun-facing wall from 5.62 to 5.55 — while the shade
+ * they are measured against drops 0.8 to 1.7 stops. Sun-versus-shade on one
+ * horizontal material goes from 1.85 stops to 2.57.
  */
-const KEY_BOOST = 1.9;
+const KEY_BOOST = 2.05;
 
 /**
  * Sun, cascaded shadow maps, and the local light budget.
@@ -61,6 +84,7 @@ const KEY_BOOST = 1.9;
  *   sun / hemi                         the sun light and the ambient fill
  *   sunIntensityScale / fillScale      artistic trims, applied every frame
  *   iblFillFactor / envFillScale       the two halves of the fill balance
+ *   csm.setSkyVisibility(...)          how much sky each orientation sees
  *   setShadowDistance(m) / debugCascades(bool)
  *   stats                              { pointActive, spotActive, requests, flashes }
  *
@@ -90,10 +114,11 @@ export class Lighting {
     this.fillScale = 1;
     // Weight of the hemisphere light once an env map is present. It is no longer a
     // fraction of the sky fill but the strength of the bounce term the hemisphere
-    // takes over — see _syncSky. Trimmed along with envFillScale: the two of them
-    // are what the key is measured against, and the hemisphere keeps the larger
-    // share of what is left because it is the half that has a direction.
-    this.iblFillFactor = 0.47;
+    // takes over — see _syncSky. Down from 0.47 partly as a trim and partly for
+    // bookkeeping: SKY_MIX raises the mixed chroma's own luminance from 0.75 to
+    // 0.97, so about a third of the drop buys nothing and only holds the delivered
+    // fill where it was aimed.
+    this.iblFillFactor = 0.265;
     /**
      * `scene.environmentIntensity`, i.e. how much of the sky's IBL reaches the
      * world. Not a multiplier on Materials' authored figures: Three *replaces*
@@ -102,15 +127,14 @@ export class Lighting {
      * view-model rig hands one over explicitly, so the weapon keeps its own).
      * Sky leaves the scene value at 1, so 1 is the number this is trimming.
      *
-     * Worth trimming because IBL was over half the fill and is the one fill term
-     * with almost no orientation dependence: the map's below-horizon band is 0.4x
-     * the horizon radiance, several times what a stone street reflects, so a
-     * down-facing surface read *brighter* from IBL than an up-facing one. Cutting
-     * it and handing the difference to the hemisphere buys the orientation step
-     * back. It also costs specular reflections a stop and a third, which is where
-     * the sky-coloured speckle on thin metal edges was coming from.
+     * This scales diffuse *and* specular together, which is why the shape of the
+     * diffuse term is fixed in the shader instead (uCsmSkyVis) and this number is
+     * now only a level trim. The last third of a stop it gives up here is aimed at
+     * specular rather than at fill: the oil drum's lid was reading as a blown
+     * blue-cyan patch of reflected sky, and every thin metal edge in the level was
+     * speckled with the same.
      */
-    this.envFillScale = 0.4;
+    this.envFillScale = 0.32;
 
     const soft = game.forge?.softwareGL === true;
     this.maxPointLights = soft ? 4 : 8;
@@ -327,35 +351,31 @@ export class Lighting {
       const amb = sky?.ambientColor;
 
       if (this.game.scene.environment && horizon) {
-        // With an env map the sky's full irradiance already reaches every surface,
-        // and Materials pushes it further with envMapIntensity 1.25-1.5 — so a
-        // hemisphere tinted with the sky average is a second copy of the bluest
-        // term in the frame. Measured on flat ground at 17 degrees: sun plus env
-        // alone lands warm at blue/red 0.88-0.98, and adding a sky-tinted
-        // hemisphere on top flipped it to 1.05-1.10, which is why warm-lit paving
-        // read colder than the light falling on it.
-        //
         // The term this renderer has no source for at all is the first bounce: a
         // sunlit square throws light back up off the paving and sideways off the
-        // plaster, and that light is warm. So the hemisphere carries the bounce
-        // instead of the sky — the horizon band, which is both the brightest part
-        // of a golden-hour dome and the part the geometry actually faces, filtered
-        // through the level's own sand-and-plaster albedo. The blue fill is not
-        // lost, it is just left to the env map, which measures it correctly; the
-        // shadow side still comes out tinted.
+        // plaster, and that light is warm. So the hemisphere leads with the bounce
+        // rather than with the sky — the horizon band, which is both the brightest
+        // part of a golden-hour dome and the part the geometry actually faces,
+        // filtered through the level's own sand-and-plaster albedo. Tinting it with
+        // the sky average instead flipped warm-lit paving to blue/red 1.05-1.10,
+        // colder than the light falling on it.
         this._bounce.copy(horizon).multiply(BOUNCE_ALBEDO);
         // Normalise to unit peak so this stays a *chroma* and `base` remains the
-        // only thing carrying how bright the sky is; at golden hour the divisor is
-        // 1.015, so this is not where the up-vs-down gradient went.
+        // only thing carrying how bright the sky is.
         const mx = Math.max(this._bounce.r, this._bounce.g, this._bounce.b, 1e-5);
         this._bounce.multiplyScalar(1 / mx);
-        this.hemi.color.copy(this._bounce);
         // A downward-facing surface sees ground rather than sky, and in a walled
         // square that ground is mostly in its own shadow. Two stops down, and
-        // warmer for the extra bounce: this step is the frame's only orientation
-        // cue that does not depend on the sun reaching a surface at all.
+        // warmer for the extra bounce: taken off the raw bounce before SKY_MIX,
+        // because nothing arriving from below has been anywhere near the sky.
         this._groundColor.copy(this._bounce).lerp(GROUND_CHROMA, 0.5).multiplyScalar(GROUND_FRACTION);
         this.hemi.groundColor.copy(this._groundColor);
+        if (amb) {
+          this._bounce.lerp(amb, SKY_MIX);
+          const mb = Math.max(this._bounce.r, this._bounce.g, this._bounce.b, 1e-5);
+          this._bounce.multiplyScalar(1 / mb);
+        }
+        this.hemi.color.copy(this._bounce);
         this.hemi.intensity = base * this.iblFillFactor * this.fillScale;
         // Re-asserted every frame rather than set once: Sky rewrites this to 1
         // whenever it rebuilds the map, and Lighting updates after Sky.

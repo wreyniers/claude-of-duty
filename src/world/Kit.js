@@ -753,7 +753,13 @@ export class InstanceSet {
     const c = new THREE.Color();
     for (let i = 0; i < this.items.length; i++) {
       mesh.setMatrixAt(i, this.items[i].m);
-      c.setHex(this.items[i].c ?? 0xffffff);
+      // A Color as well as a hex, because instance colour is a linear multiplier
+      // over an authored albedo and the useful tints are the ones that do not
+      // change its value — which puts at least one channel above 1, and a hex
+      // cannot say that. The attribute is float32, so the shader takes it fine.
+      const tint = this.items[i].c;
+      if (tint && tint.isColor) c.copy(tint);
+      else c.setHex(tint ?? 0xffffff);
       mesh.setColorAt(i, c);
     }
     mesh.instanceMatrix.needsUpdate = true;

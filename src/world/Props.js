@@ -287,6 +287,15 @@ export class Props {
    * Burnt-out car hulk. Built from chamfered masses with the roof pressed in and
    * the glazing gone: a wreck reads by silhouette, so the shape gets the effort
    * and the material stays uniformly dark and rough.
+   *
+   * Dark and rough is the point, and `steel_rusted` could not deliver it. Its bare
+   * steel is metalness 1 at roughness 0.19 with a normal map at 1.4, so the dark
+   * tint crushed F0 to 0.017 while the sun still found the microfacet peak on every
+   * flake of that normal map: a black lacquer wedge speckled with blown white
+   * glints, four metres from the establishing camera and the worst surface in the
+   * set. Burnt enamel over iron is a dielectric — F0 pinned at 0.04, no glint to
+   * find — so here the tint darkens a diffuse albedo, which is what "dark" meant,
+   * and the recipe's own chips carry the exposed rust the wreck needs.
    */
   carHulk(zone, x, z, ry, tint = 0x4e483f) {
     const e = this.bat.zone(zone);
@@ -294,16 +303,17 @@ export class Props {
     const rng = this.rng;
     const base = new THREE.Matrix4().makeRotationY(ry).setPosition(x, this.y, z);
     const M = new THREE.Matrix4();
-    const col = new THREE.Color(tint);
+    const col = paint(tint, 0.35, 0.85);
     const put = (g, mat, mm, tt) => e.add(mat, g, mm, { tint: tt ?? col });
+    const SHEET = 'iron_painted_chipped';
 
     // Body: sill, floor pan, bonnet, boot, crushed cabin.
     M.makeTranslation(0, 0.52, 0).premultiply(base);
-    put(k.chamfer(1.76, 0.5, 4.0, 0.06), 'steel_rusted', M);
+    put(k.chamfer(1.76, 0.5, 4.0, 0.06), SHEET, M);
     M.makeTranslation(0, 0.86, 1.18).premultiply(base);
-    put(k.chamfer(1.66, 0.26, 1.5, 0.05), 'steel_rusted', M);
+    put(k.chamfer(1.66, 0.26, 1.5, 0.05), SHEET, M);
     M.makeTranslation(0, 0.86, -1.5).premultiply(base);
-    put(k.chamfer(1.66, 0.3, 0.9, 0.05), 'steel_rusted', M);
+    put(k.chamfer(1.66, 0.3, 0.9, 0.05), SHEET, M);
     // Cabin: A and C pillars plus a roof panel folded down on one side.
     for (const [sx, sz] of [
       [-1, 0.42],
@@ -314,13 +324,13 @@ export class Props {
       M.makeTranslation(sx * 0.78, 1.12, sz)
         .multiply(new THREE.Matrix4().makeRotationX(sz > 0 ? 0.32 : -0.16))
         .premultiply(base);
-      put(k.chamfer(0.12, 0.62, 0.14, 0.02), 'steel_rusted', M);
+      put(k.chamfer(0.12, 0.62, 0.14, 0.02), SHEET, M);
     }
     M.makeTranslation(-0.1, 1.36, -0.3)
       .multiply(new THREE.Matrix4().makeRotationZ(0.16))
       .multiply(new THREE.Matrix4().makeRotationX(0.05))
       .premultiply(base);
-    put(k.chamfer(1.6, 0.08, 1.9, 0.04), 'steel_rusted', M);
+    put(k.chamfer(1.6, 0.08, 1.9, 0.04), SHEET, M);
     // Arches, bumpers, grille.
     for (const [sx, sz] of [
       [-1, 1.32],
@@ -329,11 +339,11 @@ export class Props {
       [1, -1.3],
     ]) {
       M.makeTranslation(sx * 0.86, 0.62, sz).premultiply(base);
-      put(k.chamfer(0.1, 0.5, 0.86, 0.05), 'steel_rusted', M);
+      put(k.chamfer(0.1, 0.5, 0.86, 0.05), SHEET, M);
     }
     for (const sz of [1, -1]) {
       M.makeTranslation(0, 0.62, sz * 2.02).premultiply(base);
-      put(k.chamfer(1.7, 0.2, 0.14, 0.04), 'steel_rusted', M);
+      put(k.chamfer(1.7, 0.2, 0.14, 0.04), SHEET, M);
     }
     // Wheels: two burnt to the rim, two deflated.
     const tyre = this.set('tyre', 'rubber', () => this.tyreGeo());
@@ -352,7 +362,7 @@ export class Props {
       this.E.set(0, ry, Math.PI / 2);
       this.Q.setFromEuler(this.E);
       this.M.compose(this.P, this.Q, this.S);
-      tyre.push(this.M, 0x3b3835);
+      tyre.push(this.M, TYRE_TINTS[i % TYRE_TINTS.length]);
     }
     const C = new THREE.Matrix4().makeRotationY(ry).setPosition(x, this.y + 0.75, z);
     e.collide(1.9, 1.5, 4.2, C);
@@ -380,7 +390,7 @@ export class Props {
     const k = this.kit;
     const base = new THREE.Matrix4().makeRotationY(ry).setPosition(x, this.y, z);
     const M = new THREE.Matrix4();
-    const col = new THREE.Color(tint);
+    const col = paint(tint, 0.6, 1.3);
     M.makeTranslation(0, 0.62, 0).premultiply(base);
     e.add('iron_painted_chipped', k.chamfer(2.1, 1.2, 1.25, 0.035), M, { tint: col });
     e.collide(2.1, 1.24, 1.25, M);
@@ -448,7 +458,10 @@ export class Props {
     const e = this.bat.zone(zone);
     const k = this.kit;
     const M = new THREE.Matrix4().makeTranslation(0, 0, 0.09).premultiply(m);
-    e.add('iron_painted_chipped', k.chamfer(w, h, 0.06, 0.014), M, { tint: new THREE.Color(tint), grime: 0.5 });
+    // A sign is one of the three saturated notes in a dust-coloured frame, so it
+    // gets the most chroma of anything here — but only at the value its own enamel
+    // has, or the note is a black rectangle and the street reads grey.
+    e.add('iron_painted_chipped', k.chamfer(w, h, 0.06, 0.014), M, { tint: paint(tint, 0.72, 1.45), grime: 0.5 });
     for (const sx of [-1, 1]) {
       const B = new THREE.Matrix4().makeTranslation(sx * (w / 2 - 0.12), 0, 0.045).premultiply(m);
       e.add('steel_rusted', k.chamfer(0.05, h * 0.9, 0.09, 0.01), B, {});
@@ -457,13 +470,13 @@ export class Props {
     // without pretending to be a language.
     const A = new THREE.Matrix4().makeTranslation(0, h * 0.06, 0.125).premultiply(m);
     e.add('iron_painted_chipped', k.chamfer(w * 0.82, h * 0.3, 0.02, 0.006), A, {
-      tint: new THREE.Color(0xe4dcc6),
+      tint: paint(0xe4dcc6, 0.45, 2.1),
       grime: 0.4,
     });
     for (const sx of [-1, 1]) {
       const A2 = new THREE.Matrix4().makeTranslation(sx * w * 0.26, -h * 0.28, 0.125).premultiply(m);
       e.add('iron_painted_chipped', k.chamfer(w * 0.2, h * 0.16, 0.02, 0.006), A2, {
-        tint: new THREE.Color(0xd8cba8),
+        tint: paint(0xd8cba8, 0.45, 1.95),
         grime: 0.4,
       });
     }
@@ -713,7 +726,12 @@ export class Props {
   /** Drums, crates, pallets and cans against a wall or in a yard. */
   yardClutter(zone, x, z, ry, spread = 2.4, n = 7) {
     const rng = this.rng;
-    const drum = this.set('drum', 'steel_rusted', () => this.drumGeo());
+    // Painted steel, not bare steel. `steel_rusted` holds metalness 1 across the
+    // bare majority of its surface, and a metal has no diffuse term — so the paint
+    // tint landed on F0 instead of an albedo and every drum came out a black mirror
+    // with the zenith reflected in its lid. Paint is a dielectric; the recipe that
+    // models one is the one that lets a tint mean paint.
+    const drum = this.set('drum', 'iron_painted_chipped', () => this.drumGeo());
     const crate = this.set('crate', 'wood_plank_weathered', () => this.crateGeo(0.62));
     const pallet = this.set('pallet', 'wood_plank_weathered', () => this.palletGeo());
     const jerry = this.set('jerry', 'iron_painted_chipped', () => this.jerryGeo());
@@ -740,9 +758,9 @@ export class Props {
       } else if (roll < 0.74) {
         this.place(pallet, px, 0.02, pz, rng.float() * 3, 1, WOOD_TINTS);
       } else if (roll < 0.86) {
-        this.place(jerry, px, 0, pz, rng.float() * 3, 1, [0x4d5340, 0x565b46, 0x6a5b3c]);
+        this.place(jerry, px, 0, pz, rng.float() * 3, 1, JERRY_TINTS);
       } else {
-        this.place(gas, px, 0, pz, rng.float() * 3, 1, [0xa8531f, 0x2f5566, 0x8b8474]);
+        this.place(gas, px, 0, pz, rng.float() * 3, 1, GAS_TINTS);
       }
     }
   }
@@ -754,12 +772,10 @@ export class Props {
     let stack = 0;
     for (let i = 0; i < n; i++) {
       if (rng.float() < 0.55) {
-        this.place(set, x + rng.range(-0.1, 0.1), 0.12 + stack * 0.2, z + rng.range(-0.1, 0.1), rng.float() * 3, 1, [
-          0x2c2a28, 0x35322f, 0x232120,
-        ]);
+        this.place(set, x + rng.range(-0.1, 0.1), 0.12 + stack * 0.2, z + rng.range(-0.1, 0.1), rng.float() * 3, 1, TYRE_TINTS);
         stack++;
       } else {
-        this.place(set, x + rng.range(-1.2, 1.2), 0.3, z + rng.range(-1.2, 1.2), rng.float() * 3, 1, [0x2c2a28, 0x35322f], {
+        this.place(set, x + rng.range(-1.2, 1.2), 0.3, z + rng.range(-1.2, 1.2), rng.float() * 3, 1, TYRE_TINTS, {
           rz: Math.PI / 2 + rng.range(-0.2, 0.2),
         });
       }
@@ -778,13 +794,48 @@ export class Props {
 
 /* ------------------------------------------------------------------ palettes */
 
+/**
+ * A palette entry as a hue at constant value.
+ *
+ * Every tint in this file multiplies something a recipe already authored at the
+ * right value — an albedo on a dielectric, F0 on a metal — so a mid-tone hex does
+ * not pick the colour, it picks the colour *and* spends a stop and a half. Over
+ * `iron_painted_chipped`, whose enamel is a dark olive at 0.085 linear, that put
+ * every painted prop on the map between 0.006 and 0.02: not a faded blue barrel
+ * but a black one. Normalising to unit Rec.709 luminance hands the value back to
+ * the map and keeps only the hue, which is why channels come out above 1.
+ *
+ * `chroma` pulls saturation back off the normalised hue — normalising a saturated
+ * hex drives its dominant channel past 2 and fails the same axis from the toy end
+ * — and `gain` is where a genuinely pale or genuinely burnt film says so.
+ *
+ * The earth palettes below deliberately do not go through this. They multiply
+ * dielectric albedos three times the paint recipes', they land at 0.1-0.2 linear
+ * already, and sandbags, timber and rubble read correctly in the frames.
+ */
+function paint(hex, chroma = 0.6, gain = 1) {
+  const c = new THREE.Color(hex);
+  const l = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+  c.multiplyScalar(gain / Math.max(l, 1e-5));
+  // Toward grey in linear space: luminance is linear in the channels, so taking
+  // chroma out this way cannot disturb the value just normalised in.
+  return c.lerp(new THREE.Color(gain, gain, gain), 1 - chroma);
+}
+
 // Faded, dusty, low-chroma: every tint here multiplies an already-authored PBR
 // albedo, so anything saturated turns into a toy. The two accent lists (cloth,
 // drums) are the exception and exist on purpose.
 const SANDBAG_TINTS = [0x9a917c, 0x877e69, 0xa8a08a, 0x736b5a, 0x8f866f];
 const WOOD_TINTS = [0xc9bda6, 0xb0a48c, 0xd6cbb4, 0x9c9280];
 const DEBRIS_TINTS = [0xb9b3a8, 0xa39c90, 0xc6c0b4, 0x8e887e, 0xada38f];
-const DRUM_TINTS = [0x9b5f3a, 0x4a6b74, 0x8a8474, 0xa8763c, 0x5f6b52, 0xb4ada0];
+// Faded industrial paint: the hue varies per drum, the value does not, and the
+// gain lifts the recipe's dark enamel to the film a drum is actually painted in.
+const DRUM_TINTS = [0x9b5f3a, 0x4a6b74, 0x8a8474, 0xa8763c, 0x5f6b52, 0xb4ada0].map((h) => paint(h, 0.55, 1.5));
+const JERRY_TINTS = [0x4d5340, 0x565b46, 0x6a5b3c].map((h) => paint(h, 0.5, 1.3));
+const GAS_TINTS = [0xa8531f, 0x2f5566, 0x8b8474].map((h) => paint(h, 0.7, 1.5));
+// Rubber's own albedo is already the 0.01-0.03 a tyre has; these only age it, and
+// the bleached entry is the one that goes up rather than all three going down.
+const TYRE_TINTS = [paint(0x2c2a28, 0.4, 0.95), paint(0x35322f, 0.45, 1.35), paint(0x232120, 0.35, 0.85)];
 const CLOTH_TINTS = [0xe6e0d0, 0x7fa8c0, 0xdcb46a, 0xc4604a, 0x9aad84, 0xf0ece0];
 const GRASS_TINTS = [0xbfb488, 0xa8a072, 0xd2c79c, 0x93906c];
 const LEAF_TINTS = [0x8d9a68, 0x7a8a5c, 0xa3a878, 0x6d7a52];

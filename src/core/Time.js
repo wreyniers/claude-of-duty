@@ -50,6 +50,11 @@ export class Time {
       this._accumulator -= this.fixedStep;
       steps++;
     }
+    // Once the step cap is hit the accumulator can never drain -- 8 steps retire
+    // 67ms but a clamped frame adds up to 100ms -- so it grows without bound and
+    // the sim falls permanently further behind the clock. Drop the debt instead:
+    // running in slow motion is better than spiralling.
+    if (steps === 8) this._accumulator = 0;
     this.alpha = this._accumulator / this.fixedStep;
     return steps;
   }

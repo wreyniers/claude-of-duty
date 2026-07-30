@@ -35,6 +35,9 @@ const ONLY = arg('only', '')
   .map((s) => s.trim())
   .filter(Boolean);
 const PORT = Number(arg('port', 5199));
+const PRESET = arg('preset', '');
+const NO_POST = process.argv.includes('--no-post');
+const BUDGET_MS = Number(arg('budget', 120000));
 
 /**
  * Each shot is a named camera pose plus optional game-state setup, evaluated in
@@ -109,7 +112,7 @@ async function main() {
   server.stderr.on('data', (d) => (serverLog += d));
 
   const url = `http://127.0.0.1:${PORT}/`;
-  const report = { url, width: WIDTH, height: HEIGHT, shots: [], errors: [], warnings: [] };
+  const report = { url, width: WIDTH, height: HEIGHT, preset: PRESET || 'default', postfx: !NO_POST, shots: [], errors: [], warnings: [], timings: {} };
 
   let browser;
   try {
@@ -137,6 +140,22 @@ async function main() {
     // SwiftShader is slow; every wait needs a generous ceiling.
     page.setDefaultTimeout(180000);
 
+    // Settings are read from localStorage at boot, so the preset has to be in
+    // place before the module graph runs.
+    await page.addInitScript(
+      ([preset, noPost]) => {
+        if (preset) localStorage.setItem('cod:settings', JSON.stringify({ preset }));
+        if (noPost) window.__DISABLE_POSTFX = true;
+        window.__PROFILE = true;
+      },
+      [PRESET, NO_POST]
+    );
+
+    // Per-pass timings, so a stall can be attributed instead of guessed at.
+    await page.exposeFunction('__report', (label, ms) => {
+      report.timings[label] = ms;
+    });
+
     page.on('console', (msg) => {
       const text = msg.text();
       if (msg.type() === 'error') report.errors.push(text);
@@ -144,11 +163,25 @@ async function main() {
     });
     page.on('pageerror', (err) => report.errors.push(`pageerror: ${err.message}`));
 
+    const tBoot = Date.now();
     await page.goto(url, { waitUntil: 'load', timeout: 120000 });
     await page.waitForFunction('window.__harness && window.__harness.ready', null, { timeout: 180000 });
+    report.timings.boot = Date.now() - tBoot;
+    console.log(`[boot] ${report.timings.boot}ms  preset=${report.preset} postfx=${report.postfx} ${WIDTH}x${HEIGHT}`);
+
     await page.evaluate('window.__harness.deploy()');
+    const tSettle = Date.now();
     // Let procedural generation, shadow maps and TAA history settle.
-    await page.evaluate('window.__harness.settle(120)');
+    await page.evaluate('window.__harness.settle(40)');
+    report.timings.settle = Date.now() - tSettle;
+    const warm = await page.evaluate('window.__harness.frameStats()');
+    console.log(`[warm] settle40=${report.timings.settle}ms  frame=${warm.frame} ${warm.ms}ms/f ${warm.fps}fps`);
+    const prof = await page.evaluate('window.__harness.profile()');
+    if (prof) {
+      report.profile = prof;
+      console.log(`[prof] over ${prof.frames} frames, ms/frame:`);
+      for (const p of prof.perFrame.slice(0, 8)) console.log(`         ${p.name.padEnd(12)} ${p.ms}`);
+    }
 
     const shots = ONLY.length ? SHOTS.filter((s) => ONLY.includes(s.name)) : SHOTS;
 
@@ -169,11 +202,26 @@ async function main() {
         },
         shot.pose
       );
-      await page.evaluate(`window.__harness.settle(${shot.settle ?? 30})`);
+      await page.evaluate(`window.__harness.settle(${shot.settle ?? 12})`);
 
       const file = path.join(OUT, `${shot.name}.png`);
       // In-page rAF capture, not page.screenshot: see the note in main.js.
-      const cap = await page.evaluate('window.__harness.capture()');
+      const t0 = Date.now();
+      await page.evaluate('window.__harness.requestCapture()');
+      let cap;
+      try {
+        await page.waitForFunction('window.__harness.captureResult !== null', null, { timeout: BUDGET_MS });
+        cap = await page.evaluate('window.__harness.captureResult');
+      } catch {
+        const fs = await page.evaluate('window.__harness.frameStats()').catch(() => null);
+        report.errors.push(
+          `shot "${shot.name}" produced no frame within ${BUDGET_MS}ms` +
+            (fs ? ` (last frame ${fs.frame}, ${fs.ms}ms, ${fs.fps}fps)` : ' (page unresponsive)')
+        );
+        console.log(`[shot] ${shot.name.padEnd(12)} STALLED after ${BUDGET_MS}ms${fs ? ` — frame ${fs.frame} @ ${fs.ms}ms` : ''}`);
+        continue;
+      }
+      report.timings[`capture:${shot.name}`] = Date.now() - t0;
       await writeFile(file, Buffer.from(cap.dataUrl.split(',')[1], 'base64'));
 
       const stats = await page.evaluate(() => {

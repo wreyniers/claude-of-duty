@@ -40,6 +40,27 @@ class Game {
 
     this.paused = false;
     this.started = false;
+    // Per-system frame profiler, off unless the harness asks for it: the timing
+    // calls themselves are cheap, but the branch keeps the hot path clean.
+    this.profile = window.__PROFILE
+      ? {
+          frames: 0,
+          totals: new Map(),
+          add(name, ms) {
+            this.totals.set(name, (this.totals.get(name) || 0) + ms);
+          },
+          report() {
+            const out = [];
+            for (const [name, total] of this.totals) out.push({ name, ms: +(total / this.frames).toFixed(2) });
+            out.sort((a, b) => b.ms - a.ms);
+            return { frames: this.frames, perFrame: out };
+          },
+          reset() {
+            this.frames = 0;
+            this.totals.clear();
+          },
+        }
+      : null;
     this.systems = [];
     this.byName = new Map();
     this._raf = 0;
@@ -96,6 +117,10 @@ class Game {
       await frameYield();
     }
 
+    // Capture harness escape hatch: lets a run isolate the post chain's cost from
+    // everything else without editing settings.
+    if (window.__DISABLE_POSTFX && this.postfx) this.postfx.enabled = false;
+
     this.engine.setHorizontalFov(this.settings.fov);
     this.engine.setViewmodelFov(this.settings.viewmodelFov);
 
@@ -130,6 +155,7 @@ class Game {
   frame(now) {
     const steps = this.time.beginFrame(now);
     const t = this.time;
+    const prof = this.profile;
 
     if (!this.paused) {
       for (let i = 0; i < steps; i++) {
@@ -140,9 +166,21 @@ class Game {
 
     // Variable-rate pass: cameras, animation blending, VFX, UI. Runs while paused
     // too so menus animate and the world keeps rendering behind them.
-    for (const sys of this.systems) sys.update?.(t.dt, t.elapsed, this.paused);
-
-    this.engine.render();
+    if (prof) {
+      for (const sys of this.systems) {
+        if (!sys.update) continue;
+        const t0 = performance.now();
+        sys.update(t.dt, t.elapsed, this.paused);
+        prof.add(sys.name, performance.now() - t0);
+      }
+      const t0 = performance.now();
+      this.engine.render();
+      prof.add('@render', performance.now() - t0);
+      prof.frames++;
+    } else {
+      for (const sys of this.systems) sys.update?.(t.dt, t.elapsed, this.paused);
+      this.engine.render();
+    }
 
     for (const sys of this.systems) sys.postRender?.(t.dt);
     this.input.endFrame();
@@ -279,8 +317,24 @@ async function main() {
         requestAnimationFrame(tick);
       });
     },
-    capture() {
-      return game.requestCapture();
+    // Split into request + poll rather than one awaited call: Playwright's
+    // page.evaluate takes an argument, not a timeout, so an awaited capture that
+    // never resolves hangs the whole run with no diagnosis. Polling a field lets
+    // the driver apply a real deadline and report which pass stalled.
+    captureResult: null,
+    requestCapture() {
+      this.captureResult = null;
+      game.requestCapture().then((r) => {
+        this.captureResult = r;
+      });
+    },
+    frameStats() {
+      return { fps: Math.round(game.time.fps), frame: game.time.frame, ms: +(game.time.dt * 1000).toFixed(1) };
+    },
+    profile() {
+      const r = game.profile?.report() ?? null;
+      game.profile?.reset();
+      return r;
     },
     game,
   };

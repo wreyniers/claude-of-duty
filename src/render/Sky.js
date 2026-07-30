@@ -54,6 +54,7 @@ import * as THREE from 'three';
  */
 
 const D2R = Math.PI / 180;
+const LUMA_W = [0.2126, 0.7152, 0.0722];
 
 /** Rayleigh scattering at sea level for 680/550/450 nm, m^-1. */
 const TOTAL_RAYLEIGH = [5.804542996261093e-6, 1.3562911419845635e-5, 3.0265902468824876e-5];
@@ -72,6 +73,14 @@ const SUN_ANGULAR_RADIUS = 0.00465;
  * the zenith and caps the horizon; this exponent on the in-scatter term is the
  * cheapest honest stand-in for that fill, and it is the difference between a sky
  * that survives an ACES curve and one that clips to white above the rooflines.
+ *
+ * It compresses the in-scatter's *range*, so it is applied to its luminance.
+ * Applied per channel it also flattens the Rayleigh blue:red ratio — 4.00 to 3.21
+ * at the zenith, 2.86 to 2.38 at 25 degrees — and that ratio is the only chroma
+ * the sky has left after ACES' shoulder has worked on a band this bright: the
+ * same 25-degree patch printed at 0.12 display saturation instead of 0.20. Real
+ * multiple scattering does whiten a sky, but by adding a fill of the sky's own
+ * average colour, not by gamma-compressing each channel on its own.
  */
 const MS_FILL = 0.85;
 
@@ -91,17 +100,34 @@ const BASE_PARAMS = {
    * calibration against PostFX's exposure, not a look: at 0.1 the horizon entered
    * the ACES fit above 3.0 and came out at 89% of output range with barely five
    * levels of gradient across the whole visible band, because that far up the
-   * shoulder a doubling of radiance is worth about ten code values. Landing the
-   * band nearer 200 puts it back on the part of the curve that still has slope,
-   * which is what a vertical gradient and a readable roofline both need. The
-   * presets that override this keep their old ratio to it.
+   * shoulder a doubling of radiance is worth about ten code values. The presets
+   * that override this keep their old ratio to it.
+   *
+   * 0.062 did not get far enough down the shoulder to fix either symptom. Measured
+   * off a 1280x720 capture, the clear sky the establishing shot can actually see
+   * (9-27 degrees of elevation) printed 204-235, i.e. the top eighth of the range,
+   * so the vertical gradient across it was 15 levels and 52 degrees away from the
+   * sun the blue read 0.06 display saturation against 2.16 blue:red in linear —
+   * the curve had taken all of it. At 0.048 the same band prints 177-219 with the
+   * chroma up to 0.20, and the sky one shot up prints 131 at the zenith against
+   * 219 at the horizon: an actual gradient. The sky is now about a third of a stop
+   * under a sunlit plaster wall rather than level with it, which is also where a
+   * photograph exposed for the sunlit subject puts it.
    */
-  lum: 0.062,
+  lum: 0.048,
   sunLum: 190, // sun disc radiance: far above 1 so PostFX's bloom has an HDR source
   glow: 0.45, // extra narrow Mie aureole around the disc
   nightLum: 0.6,
   nightSky: 0x14213d,
-  cloudCoverage: 0.52,
+  /**
+   * A cloud seen from underneath at 10-25 degrees of elevation is its own shadowed
+   * base, so it substitutes grey for whatever blue is behind it. At 0.52 that was
+   * 57% of the establishing shot's sky area reading *below* the clear-atmosphere
+   * value for the same ray, and it cost the sky region a third of its saturation
+   * (0.055 measured against 0.081 for the atmosphere alone). Scattered rather than
+   * broken cover keeps the silhouette interest and lets the blue through.
+   */
+  cloudCoverage: 0.42,
   cloudDensity: 1.15,
   cloudBase: 1150,
   cloudThickness: 950,
@@ -111,7 +137,11 @@ const BASE_PARAMS = {
   cloudTint: 1.0,
   windDeg: 24,
   cirrusCoverage: 0.5,
-  cirrusDensity: 0.55,
+  // The high sheet takes no self-shadowing and is lit straight off the sun, so it
+  // is the most achromatic thing in the dome; at 0.55 it laid up to a quarter of a
+  // near-white wash over the whole upper hemisphere, which is the whole-frame veil
+  // the rubric fails post for. Thin enough to read as wisps.
+  cirrusDensity: 0.38,
   aerialDensity: 0.0052,
   aerialHeight: 70,
   aerialGlow: 0.55,
@@ -165,7 +195,7 @@ export const SKY_PRESETS = {
     rayleigh: 1.5,
     mieCoefficient: 0.0045,
     mieG: 0.76,
-    lum: 0.053, // the same 0.62 recalibration as the base, relative offset kept
+    lum: 0.041, // relative offset from the base's own calibration, kept across it
     sunLum: 240,
     glow: 0.25,
     cloudCoverage: 0.38,
@@ -201,7 +231,7 @@ export const SKY_PRESETS = {
     rayleigh: 3.4,
     mieCoefficient: 0.022,
     mieG: 0.72,
-    lum: 0.047,
+    lum: 0.036,
     sunLum: 40,
     glow: 0.2,
     cloudCoverage: 0.93,
@@ -429,7 +459,9 @@ vec3 atmosphere( vec3 dir, out vec3 Fex ) {
 
 	float cosT = dot( dir, uSunDir );
 	vec3 direct = uSunE * ( ( uBetaR * rayleighPhaseF( cosT ) + uBetaM * hg( cosT, uMieG ) ) / ( uBetaR + uBetaM ) );
-	vec3 Lin = pow( max( direct * ( 1.0 - Fex ), vec3( 0.0 ) ), vec3( ${MS_FILL} ) );
+	vec3 inscat = max( direct * ( 1.0 - Fex ), vec3( 0.0 ) );
+	float inscatY = max( dot( inscat, vec3( ${LUMA_W.join(', ')} ) ), 1e-6 );
+	vec3 Lin = inscat * ( pow( inscatY, ${MS_FILL} ) / inscatY );
 	// Preetham's empirical horizon correction. Without it the zenith never goes
 	// deep at low sun and the whole sky reads as one flat wash.
 	float sunfade = clamp( pow( 1.0 - max( uSunDir.y, 0.0 ), 5.0 ), 0.0, 1.0 );
@@ -653,6 +685,7 @@ export class Sky {
     this._mie = [0, 0, 0];
     this._fex = [0, 0, 0];
     this._rad = [0, 0, 0];
+    this._msFade = [0, 0, 0];
     this._night = [0, 0, 0];
     this._sunE = 0;
     this._tmpColor = new THREE.Color();
@@ -712,8 +745,22 @@ export class Sky {
         uSkyTop: { value: new THREE.Color(0.3, 0.45, 0.7) },
         uSkyBottom: { value: new THREE.Color(0.7, 0.7, 0.7) },
         uGround: { value: new THREE.Color(BASE_PARAMS.groundTint) },
-        uCloud: { value: new THREE.Vector4(0.52, 1.15, 1150, 950) },
-        uCloud2: { value: new THREE.Vector4(1 / 5200, 1, 0.5, 0.55) },
+        uCloud: {
+          value: new THREE.Vector4(
+            BASE_PARAMS.cloudCoverage,
+            BASE_PARAMS.cloudDensity,
+            BASE_PARAMS.cloudBase,
+            BASE_PARAMS.cloudThickness
+          ),
+        },
+        uCloud2: {
+          value: new THREE.Vector4(
+            BASE_PARAMS.cloudScale,
+            BASE_PARAMS.cloudTint,
+            BASE_PARAMS.cirrusCoverage,
+            BASE_PARAMS.cirrusDensity
+          ),
+        },
         uWind: { value: new THREE.Vector2(0.004, 0.001) },
         uStars: { value: 0 },
         uDither: { value: 0.01 },
@@ -929,15 +976,20 @@ export class Sky {
     const mp = hgPhase(cosT, this.params.mieG);
     const sunfade = Math.min(1, Math.pow(Math.max(0, 1 - Math.max(this.sunDirection.y, 0)), 5));
     const out = this._rad;
+    const fade = this._msFade;
+    let y = 0;
     for (let i = 0; i < 3; i++) {
       const bR = this._betaR[i];
       const bM = this._betaM[i];
       const fex = Math.exp(-(bR * sR + bM * sM));
       const direct = (this._sunE * (bR * rp + bM * mp)) / (bR + bM);
-      let lin = Math.pow(Math.max(direct * (1 - fex), 0), MS_FILL);
-      lin *= 1 + (Math.sqrt(Math.max(direct * fex, 0)) - 1) * sunfade;
-      out[i] = lin * this.params.lum + this._night[i];
+      out[i] = Math.max(direct * (1 - fex), 0);
+      fade[i] = 1 + (Math.sqrt(Math.max(direct * fex, 0)) - 1) * sunfade;
+      y += LUMA_W[i] * out[i];
     }
+    const yc = Math.max(y, 1e-6);
+    const ms = Math.pow(yc, MS_FILL) / yc;
+    for (let i = 0; i < 3; i++) out[i] = out[i] * ms * fade[i] * this.params.lum + this._night[i];
     return target.setRGB(out[0], out[1], out[2]);
   }
 

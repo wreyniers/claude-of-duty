@@ -146,7 +146,81 @@ class Game {
 
     for (const sys of this.systems) sys.postRender?.(t.dt);
     this.input.endFrame();
+
+    // Frame capture has to happen here, inside the rAF turn that just drew, while
+    // the drawing buffer is still valid. Chromium discards it on composite, and
+    // reading it from a later macrotask (which is what page.screenshot does) hands
+    // back transparent black — and under this sandbox's SwiftShader build a second
+    // compositor-driven screenshot never returns at all.
+    if (this._capturePending) {
+      const resolve = this._capturePending;
+      this._capturePending = null;
+      resolve(captureFrame(this.engine));
+    }
   }
+
+  requestCapture() {
+    return new Promise((resolve) => {
+      this._capturePending = resolve;
+    });
+  }
+}
+
+/**
+ * Reads back the live frame and reports both the PNG and the statistics the
+ * review rubric's tone axis is graded on. Doing the analysis here rather than in
+ * Node means it sees the true framebuffer, including whether anything is actually
+ * clipping or crushing.
+ */
+function captureFrame(engine) {
+  const canvas = engine.renderer.domElement;
+  const gl = engine.renderer.getContext();
+  const w = gl.drawingBufferWidth;
+  const h = gl.drawingBufferHeight;
+
+  const px = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+
+  let sum = 0;
+  let sumSq = 0;
+  let n = 0;
+  let clipped = 0;
+  let crushed = 0;
+  let sat = 0;
+  const hist = new Array(32).fill(0);
+  // Every 3rd pixel on each axis: plenty for distribution statistics, ~9x cheaper.
+  for (let y = 0; y < h; y += 3) {
+    for (let x = 0; x < w; x += 3) {
+      const i = (y * w + x) * 4;
+      const r = px[i];
+      const g = px[i + 1];
+      const b = px[i + 2];
+      const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      sum += l;
+      sumSq += l * l;
+      n++;
+      hist[Math.min(31, l / 8) | 0]++;
+      if (r > 253 && g > 253 && b > 253) clipped++;
+      if (l < 2) crushed++;
+      const mx = Math.max(r, g, b);
+      const mn = Math.min(r, g, b);
+      if (mx > 0) sat += (mx - mn) / mx;
+    }
+  }
+  const mean = sum / n;
+  return {
+    dataUrl: canvas.toDataURL('image/png'),
+    width: w,
+    height: h,
+    stats: {
+      mean: +mean.toFixed(2),
+      stddev: +Math.sqrt(Math.max(0, sumSq / n - mean * mean)).toFixed(2),
+      clippedPct: +((clipped / n) * 100).toFixed(2),
+      crushedPct: +((crushed / n) * 100).toFixed(2),
+      meanSaturation: +(sat / n).toFixed(3),
+      histogram: hist,
+    },
+  };
 }
 
 function frameYield() {
@@ -204,6 +278,9 @@ async function main() {
         const tick = () => (n-- <= 0 ? res() : requestAnimationFrame(tick));
         requestAnimationFrame(tick);
       });
+    },
+    capture() {
+      return game.requestCapture();
     },
     game,
   };

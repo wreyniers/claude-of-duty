@@ -172,7 +172,9 @@ async function main() {
       await page.evaluate(`window.__harness.settle(${shot.settle ?? 30})`);
 
       const file = path.join(OUT, `${shot.name}.png`);
-      await page.screenshot({ path: file, type: 'png', timeout: 180000, animations: 'allow', caret: 'initial' });
+      // In-page rAF capture, not page.screenshot: see the note in main.js.
+      const cap = await page.evaluate('window.__harness.capture()');
+      await writeFile(file, Buffer.from(cap.dataUrl.split(',')[1], 'base64'));
 
       const stats = await page.evaluate(() => {
         const g = window.GAME;
@@ -187,37 +189,20 @@ async function main() {
         };
       });
 
-      // A frame that is uniformly one colour is almost always a bug, not a look.
-      const variance = await page.evaluate(() => {
-        const c = document.getElementById('viewport');
-        const gl = c.getContext('webgl2') || c.getContext('webgl');
-        const w = 64;
-        const h = 36;
-        // Re-read via a downscaled 2D copy of the canvas to avoid GL readback cost.
-        const tmp = document.createElement('canvas');
-        tmp.width = w;
-        tmp.height = h;
-        const ctx = tmp.getContext('2d');
-        ctx.drawImage(c, 0, 0, w, h);
-        const d = ctx.getImageData(0, 0, w, h).data;
-        let sum = 0;
-        let sumSq = 0;
-        const n = w * h;
-        for (let i = 0; i < d.length; i += 4) {
-          const l = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
-          sum += l;
-          sumSq += l * l;
-        }
-        const mean = sum / n;
-        return { mean: +mean.toFixed(2), stddev: +Math.sqrt(sumSq / n - mean * mean).toFixed(2), gl: gl ? 'ok' : 'missing' };
-      });
+      const variance = cap.stats;
 
       report.shots.push({ name: shot.name, label: shot.label, file: path.relative(ROOT, file), stats, variance });
       console.log(
-        `[shot] ${shot.name.padEnd(12)} fps=${String(stats.fps).padStart(3)} draws=${String(stats.drawCalls).padStart(4)} tris=${String(stats.triangles).padStart(8)} mean=${variance.mean} sd=${variance.stddev}`
+        `[shot] ${shot.name.padEnd(12)} fps=${String(stats.fps).padStart(3)} draws=${String(stats.drawCalls).padStart(4)} tris=${String(stats.triangles).padStart(8)} mean=${variance.mean} sd=${variance.stddev} clip=${variance.clippedPct}% crush=${variance.crushedPct}%`
       );
       if (variance.stddev < 3) {
         report.errors.push(`shot "${shot.name}" is nearly flat (stddev ${variance.stddev}) — likely a render failure`);
+      }
+      if (variance.clippedPct > 8) {
+        report.warnings.push(`shot "${shot.name}" clips to pure white over ${variance.clippedPct}% of frame`);
+      }
+      if (variance.crushedPct > 12) {
+        report.warnings.push(`shot "${shot.name}" crushes to pure black over ${variance.crushedPct}% of frame`);
       }
     }
   } catch (err) {

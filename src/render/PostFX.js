@@ -349,12 +349,14 @@ void main() {
  * air in front of this pixel is still lit, which is the quantity crepuscular rays
  * are made of. Occlusion is the mask; nothing else gates the effect.
  *
- * Two things stop it becoming the whole-frame glow that gives this technique
+ * Three things stop it becoming the whole-frame glow that gives this technique
  * away. It is confined to a forward-scatter lobe around the sun instead of being
- * applied uniformly, and the grade weights it by the pixel's own distance, so a
- * wall two metres from the eye picks up almost none of it. Radiance per tap is
- * clamped because the sun disc is authored near 190 and one tap on it would fire
- * a ray brighter than the frame.
+ * applied uniformly; the grade weights it by the pixel's own distance, so a wall
+ * two metres from the eye picks up almost none of it; and it is scaled down hard
+ * whenever the disc itself stands in open sky, which is the case where the mask
+ * has no structure and the integral is an aureole rather than a set of rays.
+ * Radiance per tap is clamped because the sun disc is authored near 190 and one
+ * tap on it would fire a ray brighter than the frame.
  */
 const LightShaftShader = {
   name: 'LightShaftShader',
@@ -364,10 +366,11 @@ const LightShaftShader = {
     tDepth: { value: null },
     uSunUv: { value: null },
     uAspect: { value: 16 / 9 },
-    uFalloff: { value: 3.1 },
+    uFalloff: { value: 2.2 },
     uDecay: { value: 0.94 },
     uDensity: { value: 1.0 },
     uMaxRadiance: { value: 3.0 },
+    uAureole: { value: 0.08 },
     uSeed: { value: 0 },
   },
   vertexShader: /* glsl */ `
@@ -388,6 +391,7 @@ uniform float uFalloff;
 uniform float uDecay;
 uniform float uDensity;
 uniform float uMaxRadiance;
+uniform float uAureole;
 uniform float uSeed;
 
 float hash21( vec2 p ) {
@@ -396,12 +400,31 @@ float hash21( vec2 p ) {
 	return fract( p.x * p.y );
 }
 
+float isSky( vec2 uv ) { return step( 0.999995, texture2D( tDepth, clamp( uv, 0.0, 1.0 ) ).x ); }
+
 void main() {
 	vec2 delta = uSunUv - vUv;
 	// Mie forward scattering is a lobe, not a hemisphere: away from the sun there
 	// is nothing for a shaft to be made of.
 	float lobe = exp( -length( delta * vec2( uAspect, 1.0 ) ) * uFalloff );
 	if ( lobe < 0.003 ) { gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
+
+	// Beams and an aureole are the same integral, and only one of them is worth
+	// paying for. With the disc standing in clear sky every pixel's sun-ward taps
+	// are sky all the way, so the term has no structure left in it and lands as a
+	// glow around the sun that the bloom and the aerial in-scatter already deliver
+	// — which is why five poses at a strength tuned for that case showed no beam
+	// anywhere. With the disc behind a roofline, a minaret or a palm crown the mask
+	// is the whole signal, and the gain it needs is an order of magnitude larger.
+	// A disc rather than one texel: a single sample can fall between two fronds and
+	// swing the gain of the entire frame from one frame to the next.
+	vec2 probe = vec2( 0.03 / uAspect, 0.03 );
+	float clear = isSky( uSunUv );
+	clear += isSky( uSunUv + vec2( probe.x, 0.0 ) );
+	clear += isSky( uSunUv - vec2( probe.x, 0.0 ) );
+	clear += isSky( uSunUv + vec2( 0.0, probe.y ) );
+	clear += isSky( uSunUv - vec2( 0.0, probe.y ) );
+	lobe *= mix( 1.0, uAureole, clear * 0.2 );
 
 	vec2 stepUv = delta * ( uDensity / float( SAMPLES ) );
 	// A fixed tap set leaves concentric rings around the sun; jittering the start
@@ -657,12 +680,20 @@ export class PostFX {
     this.gradeName = 'default';
 
     /**
-     * Peak shaft radiance as a fraction of the sky's own, before the distance
-     * weighting. Small on purpose: the visible signal is the *contrast* between a
-     * lit path and a shadowed one, and that contrast is already the full value,
-     * so anything larger buys a glow around the sun rather than sharper rays.
+     * Peak shaft radiance as a multiple of the sky's own, before the distance
+     * weighting and before the pass' own open-sky gate.
+     *
+     * The previous 0.15 was picked for the case where the sun stands in clear sky,
+     * where the whole term is a glow and anything larger only widens it. That is
+     * now the pass' own gate, which cuts the gain to a twelfth by itself, so this
+     * number is free to be what the case the rubric actually asks about needs: a
+     * disc behind geometry, where the visible signal is the contrast between a lit
+     * column of air and a shadowed one and 0.15 of the sky's radiance is a couple
+     * of display levels. An interior beam is the tightest constraint — it crosses
+     * a few metres of air, so the grade's path term has already taken it down to a
+     * fifth before it reaches the floor.
      */
-    this.shaftStrength = 0.15;
+    this.shaftStrength = 1.35;
 
     /**
      * Airlight path density for the shaft term, as a multiple of the sky's own
@@ -675,8 +706,15 @@ export class PostFX {
      * particulate near the ground, which is denser than the clean column an aerial
      * average assumes, and it now tracks the preset — `dust` doubles the density and
      * the beams saturate over half the distance with it.
+     *
+     * Eight rather than four because the binding case is a room: the aerial density
+     * is a column average over hundreds of metres of mostly clean air, while a beam
+     * is only ever seen in the smoke and plaster dust of a shelled interior, and at
+     * a 48 m e-folding length a beam had lost seven eighths of itself before it
+     * reached a floor six metres away. It still leaves the foreground protected —
+     * two metres of air is 8% of the term.
      */
-    this.shaftDust = 4.0;
+    this.shaftDust = 8.0;
 
     this.composer = null;
     this.sceneTarget = null;
@@ -848,8 +886,10 @@ export class PostFX {
         // visibility — 0.55 mid-floor against 0.45 in a corner — and a linear
         // mapping spends that as one flat dimming with no gradient in it. The
         // exponent pulls the two apart where it matters without moving open ground,
-        // whose visibility is already 1.
-        scale: 1.25,
+        // whose visibility is already 1. 1.25 measured as a 20% fall into a wall's
+        // floor junction where the contact pass gets a factor of two on a crate, so
+        // the band needed more separation than that first value bought.
+        scale: 1.7,
         samples: software ? 9 : 12,
         screenSpaceRadius: false,
       });

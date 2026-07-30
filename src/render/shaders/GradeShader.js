@@ -92,7 +92,7 @@ export const GradeShader = {
     // this from the sky's own aerial density each frame so the two atmosphere terms
     // cannot disagree about the air between the eye and a surface; the default is
     // that same figure under the default weather, for anyone driving the pass alone.
-    uShaftPath: { value: 1 / 48 },
+    uShaftPath: { value: 1 / 24 },
     uCamPlanes: { value: null },
 
     uExposure: { value: 1 },

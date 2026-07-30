@@ -86,7 +86,17 @@ const BASE_PARAMS = {
   rayleigh: 2.0,
   mieCoefficient: 0.0075,
   mieG: 0.8,
-  lum: 0.1, // scales the model's radiance into the renderer's linear range
+  /**
+   * Scales the model's radiance into the renderer's linear range, and it is a
+   * calibration against PostFX's exposure, not a look: at 0.1 the horizon entered
+   * the ACES fit above 3.0 and came out at 89% of output range with barely five
+   * levels of gradient across the whole visible band, because that far up the
+   * shoulder a doubling of radiance is worth about ten code values. Landing the
+   * band nearer 200 puts it back on the part of the curve that still has slope,
+   * which is what a vertical gradient and a readable roofline both need. The
+   * presets that override this keep their old ratio to it.
+   */
+  lum: 0.062,
   sunLum: 190, // sun disc radiance: far above 1 so PostFX's bloom has an HDR source
   glow: 0.45, // extra narrow Mie aureole around the disc
   nightLum: 0.6,
@@ -105,7 +115,15 @@ const BASE_PARAMS = {
   aerialDensity: 0.0052,
   aerialHeight: 70,
   aerialGlow: 0.55,
-  aerialMax: 0.94,
+  /**
+   * Ceiling on the haze blend. At 0.94 a surface a few hundred metres out
+   * converged onto the in-scatter colour to within a few code values, so a
+   * roofline or a minaret shaft ended up at the same value as the sky behind it
+   * and the skyline stopped reading. Holding back a quarter of the surface's own
+   * radiance keeps a far silhouette separated without touching the near field,
+   * which the density term already leaves alone.
+   */
+  aerialMax: 0.75,
   fogDensity: 0.0042,
   stars: 0,
   groundTint: 0x6a6154,
@@ -147,7 +165,7 @@ export const SKY_PRESETS = {
     rayleigh: 1.5,
     mieCoefficient: 0.0045,
     mieG: 0.76,
-    lum: 0.085,
+    lum: 0.053, // the same 0.62 recalibration as the base, relative offset kept
     sunLum: 240,
     glow: 0.25,
     cloudCoverage: 0.38,
@@ -183,7 +201,7 @@ export const SKY_PRESETS = {
     rayleigh: 3.4,
     mieCoefficient: 0.022,
     mieG: 0.72,
-    lum: 0.075,
+    lum: 0.047,
     sunLum: 40,
     glow: 0.2,
     cloudCoverage: 0.93,
@@ -194,7 +212,7 @@ export const SKY_PRESETS = {
     cirrusDensity: 0.2,
     aerialDensity: 0.0115,
     aerialGlow: 0.15,
-    aerialMax: 0.97,
+    aerialMax: 0.82, // a flat overcast may converge harder than a clear sky
     fogDensity: 0.011,
     sunTintMix: 0.8,
   },
@@ -626,7 +644,7 @@ export class Sky {
       uAerialHorizon: { value: new THREE.Color(0.5, 0.6, 0.75) },
       uAerialZenith: { value: new THREE.Color(0.25, 0.38, 0.62) },
       uAerialSunTint: { value: new THREE.Color(1, 0.7, 0.42) },
-      uAerialParams: { value: new THREE.Vector4(0.0052, 1 / 70, 0.55, 0.94) },
+      uAerialParams: { value: new THREE.Vector4(0.0052, 1 / 70, 0.55, 0.75) },
     };
 
     // Scratch. update() runs every frame and must not allocate.

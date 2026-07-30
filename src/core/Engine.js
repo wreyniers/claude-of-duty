@@ -24,6 +24,10 @@ export class Engine {
       stencil: false,
       depth: true,
       powerPreference: 'high-performance',
+      // Measured on this sandbox: preserving the drawing buffer quadruples the
+      // cost of every frame, which is far worse than what it saves the capture
+      // harness. The harness instead renders and reads inside one task, where the
+      // buffer is still valid because nothing has composited in between.
       preserveDrawingBuffer: false,
     });
 
@@ -133,6 +137,52 @@ export class Engine {
 
     this.timings.world = t1 - t0;
     this.timings.viewmodel = performance.now() - t1;
+
+    // Diagnostic only. GL calls return before the work is done, so the timings
+    // above measure submission, not rasterisation; forcing a finish is the only
+    // way to learn what a frame actually costs. Never on in normal running — it
+    // throws away all CPU/GPU overlap.
+    if (window.__GL_FINISH) {
+      const t2 = performance.now();
+      r.getContext().finish();
+      this.timings.finish = performance.now() - t2;
+    }
+  }
+
+  /**
+   * Draw a complete frame — world, post chain, view model — into a render target
+   * and return the target the finished image ended up in.
+   *
+   * Used only by the capture harness: reading a render target is thousands of
+   * times cheaper here than reading the canvas. If the post chain is off or has
+   * no target path, the fallback renders the raw scene into `fallback`, and the
+   * caller is told, because grading an ungraded frame would be worse than not
+   * grading one.
+   */
+  renderToTarget(fallback) {
+    const r = this.renderer;
+    r.info.reset();
+    this.viewmodelCamera.position.copy(this.camera.position);
+    this.viewmodelCamera.quaternion.copy(this.camera.quaternion);
+
+    let out = fallback;
+    let graded = false;
+    if (this.postfx?.enabled && this.postfx.renderTo) {
+      out = this.postfx.renderTo();
+      graded = true;
+    } else {
+      r.setRenderTarget(fallback);
+      r.clear();
+      r.render(this.scene, this.camera);
+    }
+
+    r.setRenderTarget(out);
+    r.autoClear = false;
+    r.clearDepth();
+    r.render(this.viewmodelScene, this.viewmodelCamera);
+    r.autoClear = true;
+    r.setRenderTarget(null);
+    return { target: out, graded };
   }
 
   dispose() {

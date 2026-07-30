@@ -381,7 +381,9 @@ const SCENARIOS = [
 
 async function main() {
   await mkdir(OUT, { recursive: true });
-  const server = spawn('npx', ['vite', '--port', String(PORT), '--strictPort', '--host', '127.0.0.1'], {
+  // Harness config, not the root one: hot reload off, so an edit landing mid-run
+  // cannot reload the page out from under the test.
+  const server = spawn('npx', ['vite', '--config', 'tools/vite.harness.config.js', '--port', String(PORT), '--strictPort', '--host', '127.0.0.1'], {
     cwd: ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -392,6 +394,22 @@ async function main() {
   const url = `http://127.0.0.1:${PORT}/`;
   const consoleErrors = [];
   let browser;
+  // A killed run must not leave a headless Chromium behind: one orphan spins a
+  // software rasteriser at two of this box's four cores and silently slows every
+  // later run.
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try {
+      browser?.process()?.kill('SIGKILL');
+    } catch {
+      /* already gone */
+    }
+    server.kill('SIGKILL');
+  };
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => (cleanup(), process.exit(130)));
+  process.on('exit', cleanup);
 
   try {
     await waitForServer(url);
@@ -416,7 +434,13 @@ async function main() {
       localStorage.setItem('cod:settings', JSON.stringify({ preset: 'low' }));
       if (noPost) window.__DISABLE_POSTFX = true;
     }, !WITH_POST);
+    // See screenshot.mjs: without this the browser can serve a module cached on
+    // an earlier run, and a test would pass against code that no longer exists.
+    await page.context().setExtraHTTPHeaders({ 'Cache-Control': 'no-cache', Pragma: 'no-cache' });
     page.on('console', (m) => {
+      // Vite injects its client even with hot reload off; its failed websocket
+      // attempt is dev-server noise, not a defect in the game.
+      if (/WebSocket connection to 'ws:/.test(m.text())) return;
       if (m.type() === 'error') consoleErrors.push(m.text());
     });
     page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));

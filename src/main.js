@@ -178,6 +178,7 @@ class Game {
       prof.add('@render', performance.now() - t0);
       prof.add('@render:world+post', this.engine.timings.world);
       prof.add('@render:viewmodel', this.engine.timings.viewmodel);
+      if (this.engine.timings.finish !== undefined) prof.add('@render:glFinish', this.engine.timings.finish);
       prof.frames++;
     } else {
       for (const sys of this.systems) sys.update?.(t.dt, t.elapsed, this.paused);
@@ -187,19 +188,13 @@ class Game {
     for (const sys of this.systems) sys.postRender?.(t.dt);
     this.input.endFrame();
 
-    // Frame capture has to happen here, inside the rAF turn that just drew, while
-    // the drawing buffer is still valid. Chromium discards it on composite, and
-    // reading it from a later macrotask (which is what page.screenshot does) hands
-    // back transparent black — and under this sandbox's SwiftShader build a second
-    // compositor-driven screenshot never returns at all.
+    // Kept for anything that wants the frame the loop just drew. Capture itself no
+    // longer needs it — it renders its own frame into a target — but a caller that
+    // wants exactly this frame's state still has a hook.
     if (this._capturePending) {
       const resolve = this._capturePending;
       this._capturePending = null;
-      const shot = captureFrame(this.engine);
-      // The readback binds framebuffers behind three.js's back; make it re-upload
-      // its state rather than trust a cache that no longer matches the driver.
-      this.renderer.resetState?.();
-      resolve(shot);
+      resolve(captureFrame(this.engine));
     }
   }
 
@@ -212,43 +207,48 @@ class Game {
 
 let snapCanvas = null;
 let snapCtx = null;
-let blitFbo = null;
-let blitRbo = null;
-let blitSize = { w: 0, h: 0 };
+let captureTarget = null;
+
+/** Half-float bits to Number. Enough for image data; no subnormal handling. */
+function halfToFloat(h) {
+  const s = (h & 0x8000) >> 15;
+  const e = (h & 0x7c00) >> 10;
+  const f = h & 0x03ff;
+  const v = e === 0 ? f * 2 ** -24 : e === 0x1f ? (f ? NaN : Infinity) : (f / 1024 + 1) * 2 ** (e - 15);
+  return s ? -v : v;
+}
 
 /**
- * Copy the finished frame out through a framebuffer we own.
+ * Read a render target as 8-bit sRGB bytes, whatever its own format is.
  *
- * Snapshotting the canvas itself — gl.readPixels on the default framebuffer,
- * drawImage into a 2D canvas, or page.screenshot, which are all the same
- * underlying path — costs about 104 microseconds per pixel under this sandbox's
- * SwiftShader build: a hundred seconds for one 1280x720 frame, measured. Blitting
- * the back buffer into a renderbuffer and reading that instead avoids whatever
- * that path is doing. Returns bottom-up rows, as readPixels always does.
+ * The post chain's ping-pong buffers are half-float, because 8 bits would band
+ * the sky before the grade ever saw it, and a byte read against a half-float
+ * attachment returns nothing at all — which looks exactly like a black frame. So
+ * the type has to be honoured.
+ *
+ * Whether to apply the sRGB transfer function is the caller's to know, not
+ * something to guess from the buffer: the grade pass ends with the OETF itself,
+ * so a graded frame is already display-encoded and encoding it twice lifts the
+ * midtones and flattens the contrast — which reads as a washed-out image rather
+ * than as a bug. Only the ungraded fallback needs the encode.
  */
-function blitReadback(gl, w, h) {
-  if (!gl.blitFramebuffer) return null;
-  if (!blitFbo || blitSize.w !== w || blitSize.h !== h) {
-    if (blitFbo) {
-      gl.deleteFramebuffer(blitFbo);
-      gl.deleteRenderbuffer(blitRbo);
-    }
-    blitFbo = gl.createFramebuffer();
-    blitRbo = gl.createRenderbuffer();
-    gl.bindRenderbuffer(gl.RENDERBUFFER, blitRbo);
-    gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, w, h);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, blitFbo);
-    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, blitRbo);
-    blitSize = { w, h };
+function readTargetAsBytes(renderer, target, w, h, displayEncoded) {
+  if (target.texture.type !== THREE.HalfFloatType) {
+    const px = new Uint8Array(w * h * 4);
+    renderer.readRenderTargetPixels(target, 0, 0, w, h, px);
+    return px;
   }
-  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
-  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, blitFbo);
-  gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
-  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, blitFbo);
+  const raw = new Uint16Array(w * h * 4);
+  renderer.readRenderTargetPixels(target, 0, 0, w, h, raw);
   const px = new Uint8Array(w * h * 4);
-  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
-  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
-  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+  for (let i = 0; i < raw.length; i += 4) {
+    for (let c = 0; c < 3; c++) {
+      const v = Math.max(0, Math.min(1, halfToFloat(raw[i + c])));
+      const out = displayEncoded ? v : v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055;
+      px[i + c] = Math.round(out * 255);
+    }
+    px[i + 3] = 255;
+  }
   return px;
 }
 
@@ -258,12 +258,14 @@ function blitReadback(gl, w, h) {
  * Node means it sees the true framebuffer, including whether anything is actually
  * clipping or crushing.
  *
- * The frame is snapshotted exactly once, into a 2D canvas, and both the PNG and
- * the statistics come off that. Do NOT reach for gl.readPixels here: reading the
- * default framebuffer takes a hundred seconds per frame under this sandbox's
- * SwiftShader build — measured, not guessed — while the canvas snapshot path
- * costs about a tenth of a second. It has to happen inside the rAF that drew the
- * frame either way, since the drawing buffer is not preserved.
+ * The frame is drawn into a render target and read from there. Do NOT be tempted
+ * into reading the canvas instead: any CPU read that touches the default
+ * framebuffer costs sixty to a hundred seconds per frame on this sandbox's
+ * SwiftShader build, by every route tried — readPixels, drawImage into a 2D
+ * canvas, a blit into our own framebuffer, page.screenshot. Reading a render
+ * target costs the frame's own render and nothing more. The canvas snapshot
+ * survives only as a fallback for the case where the target read comes back
+ * empty, because a black PNG that looks like a capture is the worst outcome here.
  */
 function captureFrame(engine) {
   const canvas = engine.renderer.domElement;
@@ -286,13 +288,24 @@ function captureFrame(engine) {
     snapCtx = snapCanvas.getContext('2d', { willReadFrequently: true, alpha: false });
   }
 
-  stage('blit');
+  stage('renderToTarget');
   const tRead = performance.now();
-  let px = window.__CAPTURE_VIA_CANVAS ? null : blitReadback(gl, w, h);
-  let path = 'blit';
+  let px = null;
+  let path = 'target';
   let flipped = true;
-  // A blit that comes back uniformly black means the fast path did not see the
-  // frame; fall back rather than hand a review agent a black image.
+  let graded = true;
+  if (!window.__CAPTURE_VIA_CANVAS && engine.renderToTarget) {
+    if (!captureTarget || captureTarget.width !== w || captureTarget.height !== h) {
+      captureTarget?.dispose();
+      captureTarget = new THREE.WebGLRenderTarget(w, h, { type: THREE.UnsignedByteType, depthBuffer: true });
+    }
+    const rendered = engine.renderToTarget(captureTarget);
+    graded = rendered.graded;
+    stage('readTarget');
+    px = readTargetAsBytes(engine.renderer, rendered.target, w, h, graded);
+  }
+  // Uniformly transparent black means the read did not see a frame; fall back
+  // rather than hand a review agent a black image and call it a capture.
   if (px && px[(h >> 1) * w * 4 + (w >> 1) * 4] === 0 && px[3] === 0 && px[px.length - 2] === 0) px = null;
   if (!px) {
     stage('canvasSnapshot');
@@ -352,7 +365,11 @@ function captureFrame(engine) {
     width: w,
     height: h,
     path,
+    graded,
     cost: {
+      // Covers rendering the frame as well as reading it: unobserved frames are
+      // never rasterised on this box, so the read is where a frame's real cost
+      // lands. Separating the two would report two numbers that mean nothing.
       readback: +(tStats - tRead).toFixed(1),
       analyse: +(tEncode - tStats).toFixed(1),
       encode: +(tDone - tEncode).toFixed(1),
@@ -437,9 +454,11 @@ async function main() {
     captureResult: null,
     requestCapture() {
       this.captureResult = null;
-      game.requestCapture().then((r) => {
-        this.captureResult = r;
-      });
+      // Capture draws its own frame into a render target, so it does not need to
+      // wait for a rAF and never touches the canvas. Still split into request and
+      // poll: the driver has to be able to apply a deadline and report which
+      // stage stalled, which an awaited evaluate cannot do.
+      this.captureResult = captureFrame(game.engine);
     },
     frameStats() {
       return { fps: Math.round(game.time.fps), frame: game.time.frame, ms: +(game.time.dt * 1000).toFixed(1) };
@@ -478,6 +497,48 @@ async function main() {
     // Bus tap for the behavioural harness: it asserts that a subsystem announced
     // something (a footstep, a shot, a landing) without having to reach inside
     // that subsystem to check. Bounded so a long run cannot grow without limit.
+    /**
+     * Where does a frame readback's cost actually come from? Answers three
+     * questions in one frame: is it per-call or per-pixel, and does reading a
+     * framebuffer we own behave differently from reading the canvas. Kept because
+     * this box's readback cost is the binding constraint on every visual review
+     * loop, and it needs re-measuring whenever the sandbox changes.
+     */
+    probeReadback(w = 320, h = 180) {
+      const r = game.renderer;
+      const gl = r.getContext();
+      const out = {};
+      const time = (label, fn) => {
+        const t = performance.now();
+        const v = fn();
+        out[label] = +(performance.now() - t).toFixed(1);
+        return v;
+      };
+
+      const one = new Uint8Array(4);
+      time('default_1x1', () => gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, one));
+      const small = new Uint8Array(w * h * 4);
+      time(`default_${w}x${h}`, () => gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, small));
+
+      const rt = new THREE.WebGLRenderTarget(w, h, { type: THREE.UnsignedByteType, depthBuffer: true });
+      r.setRenderTarget(rt);
+      time('render_to_target', () => r.render(game.scene, game.camera));
+      const buf = new Uint8Array(w * h * 4);
+      time('target_1x1', () => r.readRenderTargetPixels(rt, 0, 0, 1, 1, one));
+      time(`target_${w}x${h}`, () => r.readRenderTargetPixels(rt, 0, 0, w, h, buf));
+      r.setRenderTarget(null);
+      out.targetHasPixels = buf.some((v) => v > 4);
+      rt.dispose();
+      return out;
+    },
+
+    /** The same probe, but inside the rAF turn that drew — where captures happen. */
+    probeReadbackInRaf(w = 320, h = 180) {
+      return new Promise((res) => {
+        requestAnimationFrame(() => res(this.probeReadback(w, h)));
+      });
+    },
+
     events() {
       return busLog.slice();
     },

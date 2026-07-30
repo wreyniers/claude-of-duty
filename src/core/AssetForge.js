@@ -15,6 +15,7 @@ import {
   smoothstep,
 } from '../render/Noise.js';
 import { MATERIAL_RECIPES, MATERIAL_ALIASES, BAKE_ORDER } from '../render/Materials.js';
+import { LAYER_VIEWMODEL } from './Layers.js';
 
 /**
  * Procedural asset factory.
@@ -28,15 +29,18 @@ import { MATERIAL_RECIPES, MATERIAL_ALIASES, BAKE_ORDER } from '../render/Materi
  * CONTRACT (other systems depend on these):
  *   material(name, overrides?) -> THREE.Material     cached PBR material by name
  *   texture(name, opts?)       -> THREE.Texture      cached texture by name
+ *   mesh(name)                 -> THREE.Object3D     authored rig, fresh instance
  *   noise2D(x, y)              -> number in [-1,1]   deterministic value noise
  *   registerMaterial(name, factoryFn)
  *   registerTexture(name, factoryFn)
+ *   registerMesh(name, factoryFn)
  *
  * ADDITIONS (safe to rely on):
  *   material(name, { uvScale, repeat, normalScale, ... })  uvScale/repeat clone
  *       the maps (sharing their GPU upload) so one wall can tile at a different
  *       density than another without a second bake.
  *   materialNames                 -> string[] every recipe that can be asked for
+ *   meshNames                     -> string[] every authored rig (see RIG_MESHES)
  *   tileFor(name)                 -> metres per texture tile the recipe assumes
  *   heightTexture(name)           -> R8 height map (also in normalMap.a)
  *   noise                         -> Noise instance (perlin2/simplex3/worley2/fbm2)
@@ -64,6 +68,9 @@ export class AssetForge {
     this._textures = new Map();
     this._materialFactories = new Map();
     this._textureFactories = new Map();
+    this._meshFactories = new Map();
+    this._meshProtos = new Map();
+    this._rigMaterials = new Map();
     this._heightBytes = new Map();
     this._variants = new Map();
 
@@ -139,6 +146,7 @@ export class AssetForge {
     // baked material instead of paying for the same texture set twice.
     this.registerMaterial('default', () => this.material('concrete_cast'));
     this._registerUtilityTextures();
+    this._registerRigMeshes();
 
     // Bake in priority order under a wall-clock budget. Everything stays
     // available: whatever the budget does not cover is baked on first request,
@@ -183,6 +191,47 @@ export class AssetForge {
 
   registerTexture(name, factory) {
     this._textureFactories.set(name, factory);
+  }
+
+  registerMesh(name, factory) {
+    this._meshFactories.set(name, factory);
+  }
+
+  get meshNames() {
+    return [...this._meshFactories.keys()];
+  }
+
+  /**
+   * An authored rig by name, as a fresh instance.
+   *
+   * Geometry and materials come from a prototype that is built once, so ten
+   * instances are ten Object3Ds over one GPU upload. The clone is what the caller
+   * animates, which is why the part table has to be rebound onto it: Object3D
+   * clones copy `userData` by reference, and an animator that walked the shared
+   * table would be driving the prototype instead.
+   */
+  mesh(name) {
+    const key = this._resolveMesh(name);
+    if (!key) return null;
+    let proto = this._meshProtos.get(key);
+    if (!proto) {
+      proto = this._meshFactories.get(key)(this);
+      this._meshProtos.set(key, proto);
+    }
+    const inst = proto.clone(true);
+    const parts = {};
+    for (const p of Object.keys(proto.userData.parts || {})) parts[p] = inst.getObjectByName(p) || null;
+    inst.userData = { ...proto.userData, parts };
+    return inst;
+  }
+
+  /** Exact name, then the alias table. Unknown names return null, not a stand-in:
+   *  a mesh is a rig with a part contract, and quietly handing back a different
+   *  one would break an animator in a way that looks like an animation bug. */
+  _resolveMesh(name) {
+    if (this._meshFactories.has(name)) return name;
+    const key = String(name).toLowerCase().replace(/[^a-z]/g, '');
+    return MESH_ALIASES[key] && this._meshFactories.has(MESH_ALIASES[key]) ? MESH_ALIASES[key] : null;
   }
 
   /**
@@ -425,16 +474,34 @@ export class AssetForge {
    * The same field also drives a downward-facing grime term keyed on the world
    * normal, because dirt accumulates on up-facing surfaces and that vertical cue
    * is most of what makes a surface look weathered rather than tinted.
+   *
+   * Three world-space terms, because one is not enough to hide a tile.
+   *
+   * `scale` is a whole-district drift measured in tens of metres, and on its own it
+   * cannot break a repeat: it varies far too slowly to say anything about one
+   * three-metre tile versus the next. What kills the repeat is a term in the band
+   * just above the tile pitch (`patchFreq`, cells per metre) and a term that runs
+   * with gravity across many tiles at once (`runFreq`, stains around a metre wide
+   * and ten tall). The runs are gated on verticality, because rain streaks are
+   * something that happens to walls, and putting them on the ground is what makes
+   * a procedural scene read as uniformly dirty rather than weathered. The splash
+   * zone at the foot of a wall is deliberately not here: the level bakes that into
+   * vertex colour at merge time, and doing it twice crushes every wall base.
    */
   _patchMacro(mat, cfg) {
     const scale = cfg.scale ?? 0.11;
     const albedoAmt = cfg.albedo ?? 0.13;
     const roughAmt = cfg.rough ?? 0.12;
     const grime = cfg.grime ?? 0.22;
+    const patchAmt = cfg.patch ?? 0.14;
+    const patchFreq = cfg.patchFreq ?? 0.28;
+    const runsAmt = cfg.runs ?? 0.3;
+    const runFreq = cfg.runFreq ?? 1.3;
     const tint = new THREE.Color(cfg.tint ?? 0x6b6152);
 
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uMacro = { value: new THREE.Vector4(scale, albedoAmt, roughAmt, grime) };
+      shader.uniforms.uMacro2 = { value: new THREE.Vector4(patchAmt, patchFreq, runsAmt, runFreq) };
       shader.uniforms.uMacroTint = { value: tint };
 
       shader.vertexShader = shader.vertexShader
@@ -459,6 +526,7 @@ export class AssetForge {
           `varying vec3 vMacroPos;
 varying vec3 vMacroNrm;
 uniform vec4 uMacro;
+uniform vec4 uMacro2;
 uniform vec3 uMacroTint;
 float macroHash( vec3 p ) {
 	p = fract( p * 0.3183099 + vec3( 0.71, 0.113, 0.419 ) );
@@ -474,28 +542,33 @@ float macroVal( vec3 x ) {
 		mix( mix( macroHash( i + vec3( 0, 0, 1 ) ), macroHash( i + vec3( 1, 0, 1 ) ), f.x ),
 		mix( macroHash( i + vec3( 0, 1, 1 ) ), macroHash( i + vec3( 1, 1, 1 ) ), f.x ), f.y ), f.z );
 }
-// Two octaves, not three: each octave is eight hash evaluations per pixel, and
-// this runs on every world fragment. The third octave was worth ~0.1 of the
-// signal and a third of the cost.
-float macroField( vec3 p ) {
-	return macroVal( p ) * 0.68 + macroVal( p * 2.71 ) * 0.32;
-}
 void main() {`
         )
         .replace(
           '#include <map_fragment>',
           `#include <map_fragment>
-	float macroN = macroField( vMacroPos * uMacro.x );
-	float macroS = macroN - 0.5;
+	// Three samples, not the old two octaves of one field. Eight hash evaluations
+	// each is the whole budget here, and that fine second octave was doing work the
+	// baked maps already do — so it pays for the patch band and the runs instead.
+	float macroN = macroVal( vMacroPos * uMacro.x );
+	float macroPatch = macroVal( vMacroPos * uMacro2.y + 31.7 );
+	// y compressed, xz not: the field elongates downward, so what it paints is a
+	// run rather than a blotch.
+	float macroRun = macroVal( vec3( vMacroPos.x, vMacroPos.y * 0.08, vMacroPos.z ) * uMacro2.w );
 	float macroUp = clamp( vMacroNrm.y, 0.0, 1.0 );
+	float macroSide = 1.0 - abs( vMacroNrm.y );
 	float macroGrime = uMacro.w * macroUp * smoothstep( 0.34, 0.78, macroN );
-	diffuseColor.rgb *= 1.0 + macroS * 2.0 * uMacro.y;
-	diffuseColor.rgb = mix( diffuseColor.rgb, diffuseColor.rgb * uMacroTint * 1.6, macroGrime );`
+	// Runs are darker where the patch field is already dark, so a stain belongs to
+	// a region of the wall instead of being sprinkled evenly over all of it.
+	float macroWet = clamp( uMacro2.z * macroSide * smoothstep( 0.58, 0.93, macroRun ) * ( 1.2 - macroPatch * 0.7 ), 0.0, 1.0 );
+	float macroDirt = clamp( macroGrime + macroWet * 0.7, 0.0, 1.0 );
+	diffuseColor.rgb *= 1.0 + ( macroN - 0.5 ) * 2.0 * uMacro.y + ( macroPatch - 0.5 ) * 2.0 * uMacro2.x - macroWet * 0.3;
+	diffuseColor.rgb = mix( diffuseColor.rgb, diffuseColor.rgb * uMacroTint * 1.6, macroDirt );`
         )
         .replace(
           '#include <roughnessmap_fragment>',
           `#include <roughnessmap_fragment>
-	roughnessFactor = clamp( roughnessFactor + macroS * 2.0 * uMacro.z + macroGrime * 0.3, 0.04, 1.0 );`
+	roughnessFactor = clamp( roughnessFactor + ( macroN - 0.5 ) * 2.0 * uMacro.z + macroDirt * 0.28, 0.04, 1.0 );`
         );
 
       mat.userData.macroUniforms = shader.uniforms;
@@ -503,7 +576,7 @@ void main() {`
     // onBeforeCompile is not part of Three's program cache key, so a patched and
     // an unpatched material with identical parameters would share a program and
     // one of them would be missing the varyings. This key keeps them apart.
-    mat.customProgramCacheKey = () => 'forge-macro-1';
+    mat.customProgramCacheKey = () => 'forge-macro-2';
   }
 
   /* ------------------------------------------------- generic small textures */
@@ -555,12 +628,506 @@ void main() {`
     });
   }
 
+  /* --------------------------------------------------------------- rig meshes */
+
+  _registerRigMeshes() {
+    for (const name of Object.keys(RIG_MESHES)) this.registerMesh(name, () => RIG_MESHES[name](this));
+  }
+
+  /**
+   * A rig material: the recipe, tiled so one texture tile covers the metres it
+   * was authored for, with the world's IBL attached.
+   *
+   * The view model scene has its own two lights and no environment of its own, so
+   * a metal part with metalness 1 would have nothing to reflect and would render
+   * as a black shape with one specular dot. Handing it the sky's PMREM is what
+   * makes the receiver read as anodised aluminium rather than as a hole.
+   */
+  rigMaterial(recipe, extra) {
+    // Cached here rather than by material()'s variant table: an envMap override
+    // holds a Texture, the variant key is a JSON stringify, and Texture.toJSON
+    // throws on a bare key — so every part would otherwise get its own clone of
+    // the same material.
+    const key = `${recipe}|${JSON.stringify(extra)}`;
+    let m = this._rigMaterials.get(key);
+    if (!m) {
+      const tile = this.tileFor(recipe) || 1;
+      const o = { uvScale: [1 / tile, 1 / tile], ...extra };
+      const env = this.game.scene?.environment;
+      if (env) o.envMap = env;
+      m = this.material(recipe, o);
+      this._rigMaterials.set(key, m);
+    }
+    return m;
+  }
+
   dispose() {
     for (const m of new Set(this._materials.values())) m.dispose();
     for (const m of this._variants.values()) m.dispose();
     for (const t of this._textures.values()) t.dispose();
+    for (const m of this._rigMaterials.values()) m.dispose();
+    for (const p of this._meshProtos.values()) p.traverse((o) => o.geometry?.dispose());
   }
 }
+
+/* ------------------------------------------------------- authored rig meshes */
+
+const UP = new THREE.Vector3(0, 1, 0);
+const ONE = new THREE.Vector3(1, 1, 1);
+const _q = new THREE.Quaternion();
+const _e = new THREE.Euler();
+const _va = new THREE.Vector3();
+const _vb = new THREE.Vector3();
+
+function trs(x, y, z, rx = 0, ry = 0, rz = 0) {
+  return new THREE.Matrix4().compose(new THREE.Vector3(x, y, z), _q.setFromEuler(_e.set(rx, ry, rz, 'YXZ')), ONE);
+}
+
+/**
+ * Box with its edges knocked off, and analytic normals on the bevel.
+ *
+ * Every hard 90-degree edge on a weapon has a radius on it, and that radius is
+ * where the specular highlight lives — it is the single cue that separates a
+ * machined part from a cube with a metal texture. The corner is found by clamping
+ * the vertex into the inner box and pushing it back out along the sphere, and the
+ * normal comes from that same offset, so the bevel shades as a rounded edge
+ * rather than as a facet.
+ */
+function chamferBox(w, h, d, r = 0.004) {
+  const g = new THREE.BoxGeometry(w, h, d, 2, 2, 2);
+  const rr = Math.min(r, w * 0.49, h * 0.49, d * 0.49);
+  const hx = w / 2 - rr;
+  const hy = h / 2 - rr;
+  const hz = d / 2 - rr;
+  const p = g.attributes.position;
+  const n = g.attributes.normal;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i);
+    const y = p.getY(i);
+    const z = p.getZ(i);
+    const cx = Math.max(-hx, Math.min(hx, x));
+    const cy = Math.max(-hy, Math.min(hy, y));
+    const cz = Math.max(-hz, Math.min(hz, z));
+    const dx = x - cx;
+    const dy = y - cy;
+    const dz = z - cz;
+    const l = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (l < 1e-7) continue;
+    const k = rr / l;
+    p.setXYZ(i, cx + dx * k, cy + dy * k, cz + dz * k);
+    n.setXYZ(i, dx / l, dy / l, dz / l);
+  }
+  return g;
+}
+
+/** Cylinder lying along Z, which is the axis every part of a rifle runs on. */
+function tubeZ(r1, r2, len, seg = 10, open = false) {
+  return new THREE.CylinderGeometry(r1, r2, len, seg, 1, open).rotateX(Math.PI / 2);
+}
+
+/**
+ * Merge a part's sub-shapes into one geometry with metre-scale triplanar UVs.
+ *
+ * The 0..1 UVs a Three primitive arrives with put a 6 cm optic tube and a 30 cm
+ * receiver at the same texel count, so the machining grain would be five times
+ * coarser on one than the other. Projecting from position in metres instead
+ * gives the whole weapon one texel density, which is what lets a close read hold
+ * together.
+ */
+function mergeParts(parts) {
+  let nv = 0;
+  let ni = 0;
+  for (const [g] of parts) {
+    nv += g.attributes.position.count;
+    ni += g.index.count;
+  }
+  const pos = new Float32Array(nv * 3);
+  const nrm = new Float32Array(nv * 3);
+  const uv = new Float32Array(nv * 2);
+  const idx = nv > 65535 ? new Uint32Array(ni) : new Uint16Array(ni);
+  const nmat = new THREE.Matrix3();
+  let vo = 0;
+  let io = 0;
+  for (const [g, m] of parts) {
+    const sp = g.attributes.position;
+    const sn = g.attributes.normal;
+    nmat.setFromMatrix4(m).invert().transpose();
+    for (let i = 0; i < sp.count; i++) {
+      _va.fromBufferAttribute(sp, i).applyMatrix4(m);
+      _vb.fromBufferAttribute(sn, i).applyMatrix3(nmat).normalize();
+      const o = (vo + i) * 3;
+      pos[o] = _va.x;
+      pos[o + 1] = _va.y;
+      pos[o + 2] = _va.z;
+      nrm[o] = _vb.x;
+      nrm[o + 1] = _vb.y;
+      nrm[o + 2] = _vb.z;
+      const ax = Math.abs(_vb.x);
+      const ay = Math.abs(_vb.y);
+      const az = Math.abs(_vb.z);
+      const o2 = (vo + i) * 2;
+      if (ay >= ax && ay >= az) {
+        uv[o2] = _va.x;
+        uv[o2 + 1] = _va.z;
+      } else if (ax >= az) {
+        uv[o2] = _va.z;
+        uv[o2 + 1] = _va.y;
+      } else {
+        uv[o2] = _va.x;
+        uv[o2 + 1] = _va.y;
+      }
+    }
+    const si = g.index.array;
+    for (let i = 0; i < si.length; i++) idx[io + i] = si[i] + vo;
+    vo += sp.count;
+    io += si.length;
+    g.dispose();
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  out.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  out.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  out.setIndex(new THREE.BufferAttribute(idx, 1));
+  out.computeBoundingSphere();
+  return out;
+}
+
+/**
+ * The materials the rig is built from. Nine of them, because the rubric's view
+ * model axis is graded on whether the receiver, the barrel, the polymer and the
+ * glass read as different substances — and because a weapon that is one material
+ * end to end is the single most recognisable tell of an unfinished view model.
+ */
+const RIG_MATS = {
+  anodised: ['gun_aluminium_anodized', { envMapIntensity: 1.4 }],
+  blued: ['gun_steel_blued', { envMapIntensity: 1.5 }],
+  polymer: ['gun_polymer', {}],
+  polymerTan: ['gun_polymer', { color: 0x8f8672 }],
+  rubber: ['rubber', { color: 0x8a8a8a }],
+  glass: ['glass_dirty', { color: 0x8fa9bd, opacity: 0.55, roughness: 0.08 }],
+  emitter: ['gun_steel_blued', { color: 0x120503, emissive: 0xff3a14, emissiveIntensity: 2.6, metalness: 0 }],
+  skin: ['skin', {}],
+  cuff: ['camo_fabric', { color: 0x9a9480 }],
+};
+
+/**
+ * Part collector. A rig part is one animatable unit (the magazine drops, the
+ * charging handle cycles, the fingers stay with the grip), and inside it the
+ * shapes are merged per material — so the whole weapon is a dozen draw calls
+ * instead of eighty, while still coming apart where an animation needs it to.
+ */
+class RigBuilder {
+  constructor(forge) {
+    this.forge = forge;
+    this.parts = new Map();
+  }
+
+  put(part, mat, geo, m) {
+    let p = this.parts.get(part);
+    if (!p) this.parts.set(part, (p = new Map()));
+    let list = p.get(mat);
+    if (!list) p.set(mat, (list = []));
+    list.push([geo, m || new THREE.Matrix4()]);
+    return this;
+  }
+
+  /**
+   * Tapered limb between two points. Matrix4.lookAt puts -Z on the target, so the
+   * cylinder's top radius is the one at `a` — which is the end the caller thinks
+   * of as the start (the wrist, for a forearm).
+   */
+  limb(part, mat, a, b, rA, rB, seg = 8) {
+    _va.set(a[0], a[1], a[2]);
+    _vb.set(b[0], b[1], b[2]);
+    const len = _va.distanceTo(_vb);
+    const M = new THREE.Matrix4().lookAt(_va, _vb, UP);
+    M.setPosition(_va.lerp(_vb, 0.5));
+    return this.put(part, mat, tubeZ(rA, rB, len, seg), M);
+  }
+
+  group(name, children) {
+    const g = new THREE.Group();
+    g.name = name;
+    for (const c of children) g.add(c);
+    return g;
+  }
+
+  /** Realise every collected part as a Group of merged meshes. */
+  emit(names) {
+    const out = [];
+    for (const name of names) {
+      const p = this.parts.get(name);
+      const g = new THREE.Group();
+      g.name = name;
+      if (p) {
+        for (const [mat, list] of p) {
+          const [recipe, extra] = RIG_MATS[mat];
+          const mesh = new THREE.Mesh(mergeParts(list), this.forge.rigMaterial(recipe, extra));
+          mesh.name = `${name}_${mat}`;
+          // A view model is never a shadow caster: it is drawn by its own camera
+          // after depth is cleared, and it is not in the world's cascades at all.
+          mesh.castShadow = mesh.receiveShadow = false;
+          g.add(mesh);
+        }
+      }
+      out.push(g);
+    }
+    return out;
+  }
+}
+
+/**
+ * First-person rig: an AR-pattern carbine and the hands holding it.
+ *
+ * Authored in weapon space — muzzle toward -Z, sight line at +Y, origin at the
+ * trigger — so a view model only has to place the root. `userData.pose` carries
+ * the two placements that matter (hip and a sight-aligned ADS pose derived from
+ * the optic's own centre), and `userData.parts` names every animatable unit plus
+ * the muzzle/eject anchors, so a muzzle flash or a case ejection has a transform
+ * to hang off instead of a guessed offset.
+ */
+function buildViewmodelRig(forge) {
+  const r = new RigBuilder(forge);
+  const AXIS = 0.055; // bore height above the rig origin
+
+  // Upper receiver: a flat-sided box with the rounded top an AR has, then the
+  // rail teeth. The teeth are the cheapest mechanical detail on the whole gun —
+  // nine 7 mm ribs that catch the key light and instantly read as machined.
+  r.put('receiver', 'anodised', chamferBox(0.058, 0.05, 0.3, 0.005), trs(0, AXIS - 0.008, -0.05));
+  r.put('receiver', 'anodised', tubeZ(0.029, 0.029, 0.3, 12), trs(0, AXIS + 0.015, -0.05));
+  r.put('receiver', 'anodised', chamferBox(0.046, 0.006, 0.3, 0.001), trs(0, AXIS + 0.043, -0.05));
+  for (let i = 0; i < 10; i++) {
+    r.put('receiver', 'anodised', chamferBox(0.05, 0.008, 0.013, 0.0015), trs(0, AXIS + 0.049, -0.19 + i * 0.03));
+  }
+  // Forward assist and the brass deflector behind it: both sit on the right, and
+  // both break the receiver's silhouette where it would otherwise be a slab.
+  r.put('receiver', 'blued', tubeZ(0.009, 0.009, 0.028, 8), trs(0.021, AXIS + 0.022, 0.105));
+  r.put('receiver', 'anodised', chamferBox(0.014, 0.022, 0.026, 0.006), trs(0.028, AXIS + 0.02, 0.07));
+  r.put('ejection_cover', 'blued', chamferBox(0.005, 0.03, 0.078, 0.002), trs(0.031, AXIS + 0.004, -0.045));
+
+  // Lower receiver, magwell, trigger group. Polymer, so it reads matte against
+  // the receiver's anodised sheen even though both are near-black.
+  r.put('lower', 'polymer', chamferBox(0.046, 0.075, 0.12, 0.007), trs(0, AXIS - 0.06, -0.035));
+  r.put('lower', 'polymer', chamferBox(0.044, 0.05, 0.09, 0.006), trs(0, AXIS - 0.05, 0.055));
+  r.put('lower', 'polymer', chamferBox(0.04, 0.155, 0.058, 0.012), trs(0, AXIS - 0.15, 0.062, -0.3));
+  // Trigger guard as three bars rather than a torus: a real guard is a bent strip
+  // with corners, and the corners are what make it read at 30 cm.
+  r.put('lower', 'polymer', chamferBox(0.03, 0.008, 0.062, 0.003), trs(0, AXIS - 0.115, 0.005));
+  r.put('lower', 'polymer', chamferBox(0.03, 0.03, 0.008, 0.003), trs(0, AXIS - 0.102, -0.025));
+  r.put('trigger', 'blued', chamferBox(0.009, 0.028, 0.012, 0.004), trs(0, AXIS - 0.093, 0.0));
+
+  // Buffer tube, stock and pad. The pad is the one rubber part on the gun and the
+  // tread pattern on it is a different scale of detail from anything else here.
+  r.put('stock', 'polymer', tubeZ(0.019, 0.019, 0.2, 10), trs(0, AXIS - 0.012, 0.2));
+  r.put('stock', 'polymer', chamferBox(0.046, 0.062, 0.13, 0.012), trs(0, AXIS - 0.022, 0.225));
+  r.put('stock', 'polymer', chamferBox(0.026, 0.024, 0.1, 0.008), trs(0, AXIS + 0.022, 0.215));
+  r.put('stock', 'rubber', chamferBox(0.048, 0.088, 0.016, 0.006), trs(0, AXIS - 0.026, 0.296));
+  r.put('stock', 'blued', new THREE.TorusGeometry(0.012, 0.0035, 6, 10), trs(0.024, AXIS - 0.03, 0.15, 0, Math.PI / 2));
+
+  // Charging handle: its own part because it is the thing that moves on a fire
+  // animation, and the latch is what the eye reads moving.
+  r.put('charging_handle', 'blued', chamferBox(0.05, 0.012, 0.014, 0.003), trs(0, AXIS + 0.04, 0.135));
+  r.put('charging_handle', 'blued', chamferBox(0.016, 0.01, 0.05, 0.002), trs(0, AXIS + 0.038, 0.115));
+
+  // Magazine: three segments, each tipped a little further forward, because a
+  // STANAG is curved and a straight box magazine is a tell.
+  r.put('magazine', 'polymerTan', chamferBox(0.028, 0.08, 0.086, 0.005), trs(0, AXIS - 0.13, -0.03, 0.07));
+  r.put('magazine', 'polymerTan', chamferBox(0.028, 0.07, 0.084, 0.005), trs(0, AXIS - 0.198, -0.045, 0.19));
+  r.put('magazine', 'polymerTan', chamferBox(0.032, 0.016, 0.09, 0.004), trs(0, AXIS - 0.238, -0.058, 0.24));
+
+  // Free-float handguard: an eight-sided tube with M-LOK panel ribs. Eight sides,
+  // not sixteen: the flats are what give a thin barrel-line something for the
+  // highlight to break on.
+  r.put('handguard', 'anodised', tubeZ(0.032, 0.032, 0.3, 8, true), trs(0, AXIS, -0.34));
+  r.put('handguard', 'anodised', chamferBox(0.044, 0.006, 0.3, 0.001), trs(0, AXIS + 0.03, -0.34));
+  for (let i = 0; i < 10; i++) {
+    r.put('handguard', 'anodised', chamferBox(0.048, 0.008, 0.013, 0.0015), trs(0, AXIS + 0.036, -0.48 + i * 0.03));
+  }
+  for (let i = 0; i < 5; i++) {
+    r.put('handguard', 'anodised', tubeZ(0.0335, 0.0335, 0.008, 8), trs(0, AXIS, -0.46 + i * 0.06));
+  }
+  r.put('handguard', 'blued', new THREE.TorusGeometry(0.011, 0.003, 6, 10), trs(-0.03, AXIS - 0.018, -0.45, 0, Math.PI / 2));
+
+  // Barrel, gas block, brake. The brake's ports are rings proud of the tube: a
+  // real port is a cut, but at view-model scale the shadow line reads the same
+  // and it costs three cylinders instead of a boolean.
+  r.put('barrel', 'blued', tubeZ(0.0105, 0.0115, 0.47, 10), trs(0, AXIS, -0.345));
+  r.put('barrel', 'blued', chamferBox(0.024, 0.026, 0.04, 0.004), trs(0, AXIS + 0.006, -0.455));
+  r.put('muzzle', 'blued', tubeZ(0.0165, 0.0175, 0.06, 10), trs(0, AXIS, -0.602));
+  for (let i = 0; i < 3; i++) {
+    r.put('muzzle', 'blued', tubeZ(0.019, 0.019, 0.005, 10), trs(0, AXIS, -0.585 - i * 0.015));
+  }
+
+  // Optic: mount, two rings, tube, hood, glass at both ends and a lit dot. The
+  // glass is the only transparent thing on the rig and it is what sells the optic
+  // as an optic rather than as a black tube.
+  r.put('optic', 'anodised', chamferBox(0.044, 0.022, 0.1, 0.004), trs(0, AXIS + 0.043, -0.16));
+  r.put('optic', 'anodised', tubeZ(0.021, 0.021, 0.115, 12), trs(0, AXIS + 0.073, -0.16));
+  for (const z of [-0.115, -0.205]) {
+    r.put('optic', 'anodised', tubeZ(0.026, 0.026, 0.011, 12), trs(0, AXIS + 0.073, z));
+  }
+  r.put('optic', 'anodised', tubeZ(0.0245, 0.0245, 0.022, 12, true), trs(0, AXIS + 0.073, -0.228));
+  r.put('optic', 'anodised', tubeZ(0.008, 0.008, 0.02, 8), trs(0, AXIS + 0.09, -0.16, 0, 0, 0));
+  r.put('optic', 'glass', tubeZ(0.019, 0.019, 0.003, 12), trs(0, AXIS + 0.073, -0.216));
+  r.put('optic', 'glass', tubeZ(0.019, 0.019, 0.003, 12), trs(0, AXIS + 0.073, -0.104));
+  r.put('optic', 'emitter', tubeZ(0.0032, 0.0032, 0.003, 8), trs(0, AXIS + 0.073, -0.13));
+  // Backup irons, folded flat so they do not cross the optic's sight line.
+  r.put('receiver', 'blued', chamferBox(0.012, 0.01, 0.028, 0.002), trs(0, AXIS + 0.052, -0.02));
+  r.put('handguard', 'blued', chamferBox(0.012, 0.01, 0.026, 0.002), trs(0, AXIS + 0.041, -0.44));
+
+  buildRigHands(r, AXIS);
+
+  const weapon = r.group(
+    'weapon',
+    r.emit([
+      'receiver',
+      'ejection_cover',
+      'lower',
+      'trigger',
+      'stock',
+      'charging_handle',
+      'magazine',
+      'handguard',
+      'barrel',
+      'muzzle',
+      'optic',
+    ])
+  );
+  const hands = r.group('hands', r.emit(['hand_right', 'forearm_right', 'hand_left', 'forearm_left']));
+
+  // Anchors ride inside the part that moves them: the flash has to follow the
+  // muzzle through recoil, not sit where the muzzle was at rest.
+  const anchors = {};
+  for (const [name, parent, p] of [
+    ['muzzle_tip', 'muzzle', [0, AXIS, -0.635]],
+    ['sight', 'optic', [0, AXIS + 0.073, -0.16]],
+    ['eject', 'ejection_cover', [0.036, AXIS + 0.004, -0.03]],
+  ]) {
+    const o = new THREE.Object3D();
+    o.name = name;
+    o.position.set(p[0], p[1], p[2]);
+    weapon.getObjectByName(parent).add(o);
+    anchors[name] = o;
+  }
+
+  const rig = new THREE.Group();
+  rig.name = 'viewmodel_rig';
+  rig.add(weapon, hands);
+  // Set here rather than left to the caller: the rig is a view model asset, and a
+  // caller that adds it after its own layer pass would otherwise hand the second
+  // camera a rig it cannot see.
+  rig.traverse((o) => o.layers.set(LAYER_VIEWMODEL));
+
+  const parts = { weapon, hands, ...anchors };
+  for (const g of [...weapon.children, ...hands.children]) parts[g.name] = g;
+  rig.userData = {
+    parts,
+    // Sight-aligned: the optic's own centre put on the camera axis, so ADS lines
+    // up by construction instead of by a hand-tuned offset that drifts whenever
+    // the optic moves.
+    pose: {
+      hip: { position: [0.115, -0.175, -0.29], rotation: [0.015, -0.055, 0.02] },
+      ads: { position: [0, -(AXIS + 0.073), -0.235], rotation: [0, 0, 0] },
+      lowered: { position: [0.13, -0.33, -0.24], rotation: [-0.55, -0.2, 0.14] },
+    },
+  };
+  return rig;
+}
+
+/**
+ * Hands. Three-segment fingers with a knuckle sphere at each joint, curled around
+ * whatever they hold: the rubric's fail case here is a mitten, and a mitten is
+ * exactly what a single tapered box per hand produces. Both hands are built from
+ * the same finger routine with different base frames — the right wraps the grip
+ * front-to-left, the left goes over the handguard in a C-clamp.
+ */
+function buildRigHands(r, AXIS) {
+  /** A finger from `base`, flexing at each joint toward the frame's own -Y. */
+  const finger = (part, base, len, rad, curl) => {
+    const M = base.clone();
+    let rr = rad;
+    for (let s = 0; s < 3; s++) {
+      const L = len * [1, 0.76, 0.6][s];
+      r.put(part, 'skin', tubeZ(rr * 0.88, rr, L, 7), M.clone().multiply(trs(0, 0, -L / 2)));
+      r.put(part, 'skin', new THREE.SphereGeometry(rr * 0.95, 7, 5), M.clone().multiply(trs(0, 0, -L)));
+      M.multiply(trs(0, 0, -L)).multiply(new THREE.Matrix4().makeRotationX(-curl));
+      rr *= 0.87;
+    }
+  };
+
+  // Right hand on the pistol grip. rz = -90 deg puts the fingers' flex direction
+  // toward -X, so they close around the front of the grip.
+  const gy = AXIS - 0.15;
+  r.put('hand_right', 'skin', chamferBox(0.03, 0.095, 0.078, 0.022), trs(0.036, gy - 0.005, 0.06, -0.3, 0.1, 0));
+  r.put('hand_right', 'skin', chamferBox(0.032, 0.05, 0.05, 0.02), trs(0.032, gy + 0.055, 0.072, -0.3, 0.1, 0));
+  for (let i = 0; i < 4; i++) {
+    finger(
+      'hand_right',
+      trs(0.026, gy + 0.045 - i * 0.026, 0.052 + i * 0.006, 0, 0.1 - i * 0.05, -Math.PI / 2),
+      0.031 - i * 0.002,
+      0.0092 - i * 0.0005,
+      0.85 + i * 0.06
+    );
+  }
+  // Thumb across the back of the grip, angled down: two segments, and the one
+  // that is visible from the sight is the near knuckle.
+  finger('hand_right', trs(0.02, gy + 0.06, 0.085, -0.5, 0.7, -Math.PI / 2), 0.03, 0.011, 0.55);
+  r.limb('forearm_right', 'skin', [0.042, gy - 0.05, 0.085], [0.15, gy - 0.24, 0.31], 0.029, 0.042, 9);
+  r.limb('forearm_right', 'cuff', [0.115, gy - 0.185, 0.255], [0.17, gy - 0.28, 0.35], 0.046, 0.05, 9);
+
+  // Left hand C-clamped on the handguard. The chain has to *circumscribe* the
+  // tube: a finger laid across the top at the tube's own radius passes straight
+  // through it, and a curl per joint much tighter than segment/radius drives the
+  // tip inside. So the base sits one finger-radius clear of the tube at 155
+  // degrees, pointing along the tangent there — rx tilts the pointing direction
+  // in the plane ry has swung it into — and the joints turn by roughly the arc
+  // each segment spans, which leaves the middle knuckle a few millimetres proud
+  // and the tip pressed onto the far side.
+  const hz = -0.36;
+  const GRIP_R = 0.041;
+  const GRIP_A = 2.7;
+  r.put('hand_left', 'skin', chamferBox(0.032, 0.09, 0.075, 0.022), trs(-0.055, AXIS + 0.004, hz, 0.12, 0, 0.22));
+  r.put('hand_left', 'skin', chamferBox(0.026, 0.038, 0.064, 0.018), trs(-0.049, AXIS + 0.032, hz - 0.008, 0.12, 0, 0.22));
+  for (let i = 0; i < 4; i++) {
+    finger(
+      'hand_left',
+      trs(
+        GRIP_R * Math.cos(GRIP_A),
+        AXIS + GRIP_R * Math.sin(GRIP_A),
+        hz - 0.034 + i * 0.026,
+        GRIP_A - Math.PI / 2,
+        -Math.PI / 2,
+        0
+      ),
+      0.03 - i * 0.0015,
+      0.0092 - i * 0.0005,
+      0.92 - i * 0.02
+    );
+  }
+  // Thumb along the top of the rail rather than round it: on a rail-topped
+  // handguard that is where a thumb physically goes.
+  finger('hand_left', trs(-0.03, AXIS + 0.044, hz + 0.036, 0, -0.15, 0), 0.032, 0.0105, 0.22);
+  r.limb('forearm_left', 'skin', [-0.062, AXIS - 0.05, hz + 0.03], [-0.21, AXIS - 0.24, hz + 0.23], 0.029, 0.042, 9);
+  r.limb('forearm_left', 'cuff', [-0.17, AXIS - 0.19, hz + 0.175], [-0.235, AXIS - 0.28, hz + 0.27], 0.046, 0.05, 9);
+}
+
+const RIG_MESHES = {
+  viewmodel_rig: buildViewmodelRig,
+};
+
+/** What a sibling might plausibly ask for. `mesh()` resolves through this. */
+const MESH_ALIASES = {
+  viewmodelrig: 'viewmodel_rig',
+  viewmodel: 'viewmodel_rig',
+  rig: 'viewmodel_rig',
+  weapon: 'viewmodel_rig',
+  weaponrig: 'viewmodel_rig',
+  gun: 'viewmodel_rig',
+  arms: 'viewmodel_rig',
+  firstperson: 'viewmodel_rig',
+  firstpersonrig: 'viewmodel_rig',
+  ma: 'viewmodel_rig', // 'm4a1' with the digits stripped
+};
 
 /**
  * The scratch pad a recipe paints into: one Float32 field per PBR channel plus

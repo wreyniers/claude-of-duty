@@ -791,6 +791,25 @@ export class PostFX {
     renderer.setRenderTarget(null);
   }
 
+  /**
+   * Render the full chain into a buffer instead of the canvas, and return it.
+   *
+   * This exists for the capture harness, and it is not an optimisation — it is
+   * the only affordable way to get a frame out. On this sandbox's software
+   * rasteriser, any CPU read that touches the default framebuffer costs sixty to
+   * a hundred seconds; the same read from a render target costs about three
+   * milliseconds. Both measured. The composer already renders into its own
+   * buffers, so all this does is stop the last pass from blitting to screen and
+   * hand back the buffer the result landed in.
+   */
+  renderTo() {
+    const wasToScreen = this.composer.renderToScreen;
+    this.composer.renderToScreen = false;
+    this.render();
+    this.composer.renderToScreen = wasToScreen;
+    return this.composer.readBuffer;
+  }
+
   /* -------------------------------------------------------------------- size */
 
   setSize(w, h) {

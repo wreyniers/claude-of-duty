@@ -89,7 +89,7 @@ export const MATERIAL_RECIPES = {
     tile: 2.5,
     uvScale: 3,
     normalScale: 0.85,
-    macro: { scale: 0.062, albedo: 0.2, rough: 0.17, grime: 0.26 },
+    macro: { scale: 0.062, albedo: 0.2, rough: 0.17, grime: 0.26, patch: 0.14, patchFreq: 0.32, runs: 0.42, runFreq: 1.2 },
     build(b) {
       // gain above 0.5 deliberately: a mathematically clean fBm spectrum reads as
       // soft cloud at texture scale, and cement grain is not soft.
@@ -105,10 +105,10 @@ export const MATERIAL_RECIPES = {
       // gates which cells got a bug hole and how big it is.
       const voidId = b.cells({ freq: 22, jitter: 1, mode: 'id', seed: 707 });
       const agg = b.cells({ freq: 38, mode: 'id', seed: 1301 });
-      const base = lin(0x93918b);
-      const wet = lin(0x4c4943);
-      const pale = lin(0xb2afa4);
-      const grimy = lin(0x3f3c37);
+      const base = lin(0x9a9389);
+      const wet = lin(0x4e4a41);
+      const pale = lin(0xb7b0a0);
+      const grimy = lin(0x413d35);
       b.normalStrength = 0.85;
       b.aoRelief = 0.32;
       b.each((i, u, v) => {
@@ -123,11 +123,18 @@ export const MATERIAL_RECIPES = {
         const stain = clamp01(damp[i] * 1.5 - 0.35);
         b.height[i] = 0.62 + (g - 0.5) * 0.34 - pit * 0.55 - seam * 0.24;
         let c = mixc(base, wet, stain * 0.7);
-        // Exposed sand grains: only on the parts the cement skin has worn off.
-        c = mixc(c, pale, agg[i] > 0.82 ? (agg[i] - 0.82) * 3 * smoothstep(0.45, 0.85, g) : 0);
+        // Exposed sand grains: only on the parts the cement skin has worn off, and
+        // only in the top eighth of the cell field. At the density this recipe is
+        // tiled at on the square — a metre of paving per 85 texels — a wider gate
+        // put a bright grain every 8 cm across the largest surface in the frame,
+        // and forty metres of that reads as television static rather than as
+        // concrete. Same reason the grain's own albedo swing is halved: the
+        // mid-scale patch term in the macro shader is what should carry the
+        // variation here, because it is the one that does not repeat.
+        c = mixc(c, pale, agg[i] > 0.88 ? (agg[i] - 0.88) * 2.4 * smoothstep(0.45, 0.85, g) : 0);
         c = mixc(c, grimy, pit * 0.55 + seam * 0.3);
         b.rgb(i, ...c);
-        b.scale(i, 0.84 + g * 0.34);
+        b.scale(i, 0.91 + g * 0.19);
         // Traffic and rain polish the raised, exposed parts; the recessed
         // laitance dust and the air voids stay chalky.
         const polish = smoothstep(0.5, 0.95, g) * (1 - stain);
@@ -141,7 +148,7 @@ export const MATERIAL_RECIPES = {
     tile: 2.5,
     uvScale: 3,
     normalScale: 1.5,
-    macro: { scale: 0.06, albedo: 0.17, rough: 0.15, grime: 0.3 },
+    macro: { scale: 0.06, albedo: 0.17, rough: 0.15, grime: 0.3, patch: 0.14, patchFreq: 0.3, runs: 0.45, runFreq: 1.3 },
     build(b) {
       const spall = b.cells({ freq: 13, jitter: 1, mode: 'f1', seed: 21 });
       const spallId = b.cells({ freq: 13, jitter: 1, mode: 'id', seed: 21 });
@@ -187,7 +194,7 @@ export const MATERIAL_RECIPES = {
     tile: 2,
     uvScale: 2,
     normalScale: 1.25,
-    macro: { scale: 0.05, albedo: 0.16, rough: 0.1, grime: 0.3, tint: 0x59503f },
+    macro: { scale: 0.05, albedo: 0.16, rough: 0.1, grime: 0.3, tint: 0x59503f, patch: 0.12, patchFreq: 0.68, runs: 0.5, runFreq: 1.7 },
     build(b) {
       const clay = b.fbm({ freq: 22, octaves: 4 });
       const grit = b.fbm({ freq: 36, octaves: 3, seed: 41 });
@@ -226,7 +233,7 @@ export const MATERIAL_RECIPES = {
     tile: 3,
     uvScale: 2.5,
     normalScale: 0.5,
-    macro: { scale: 0.045, albedo: 0.17, rough: 0.13, grime: 0.3, tint: 0x5c5347 },
+    macro: { scale: 0.045, albedo: 0.17, rough: 0.13, grime: 0.3, tint: 0x5c5347, patch: 0.13, patchFreq: 0.55, runs: 0.5, runFreq: 1.5 },
     build(b) {
       const trowel = b.warp(b.fbm({ freq: 5, octaves: 4 }), { freq: 2, amount: b.size * 0.11 });
       const stipple = b.fbm({ freq: 40, octaves: 2, seed: 71 });
@@ -260,7 +267,7 @@ export const MATERIAL_RECIPES = {
     tile: 1.6,
     uvScale: 2,
     normalScale: 0.9,
-    macro: { scale: 0.08, albedo: 0.09, rough: 0.06, grime: 0.34, tint: 0x4f4a3d },
+    macro: { scale: 0.08, albedo: 0.09, rough: 0.06, grime: 0.34, tint: 0x4f4a3d, patch: 0.12, patchFreq: 0.7, runs: 0.34 },
     mat: { envMapIntensity: 1.25 },
     build(b) {
       const craze = b.ridge({ freq: 26, octaves: 3, seed: 55 });
@@ -300,7 +307,7 @@ export const MATERIAL_RECIPES = {
     tile: 4,
     uvScale: 3,
     normalScale: 1.15,
-    macro: { scale: 0.04, albedo: 0.18, rough: 0.18, grime: 0.16, tint: 0x6a6558 },
+    macro: { scale: 0.04, albedo: 0.18, rough: 0.18, grime: 0.16, tint: 0x6a6558, patch: 0.17, patchFreq: 0.26, runs: 0.2 },
     build(b) {
       const aggId = b.cells({ freq: 30, mode: 'id', seed: 3 });
       const aggH = b.cells({ freq: 30, mode: 'dome', jitter: 1, seed: 3 });
@@ -333,7 +340,7 @@ export const MATERIAL_RECIPES = {
     tile: 4,
     uvScale: 3,
     normalScale: 1.0,
-    macro: { scale: 0.05, albedo: 0.18, rough: 0.1, grime: 0.1 },
+    macro: { scale: 0.05, albedo: 0.18, rough: 0.1, grime: 0.1, patch: 0.17, patchFreq: 0.3, runs: 0.15 },
     build(b) {
       const clods = b.cells({ freq: 15, mode: 'dome', jitter: 1, seed: 7 });
       const grit = b.fbm({ freq: 30, octaves: 3, seed: 8 });
@@ -365,7 +372,7 @@ export const MATERIAL_RECIPES = {
     tile: 2.5,
     uvScale: 3,
     normalScale: 1.7,
-    macro: { scale: 0.06, albedo: 0.14, rough: 0.08, grime: 0.12 },
+    macro: { scale: 0.06, albedo: 0.14, rough: 0.08, grime: 0.12, patch: 0.17, patchFreq: 0.8, runs: 0.32, runFreq: 1.9 },
     build(b) {
       const dome = b.cells({ freq: 13, mode: 'dome', jitter: 1, seed: 31 });
       const sid = b.cells({ freq: 13, mode: 'id', jitter: 1, seed: 31 });
@@ -397,7 +404,7 @@ export const MATERIAL_RECIPES = {
     tile: 3,
     uvScale: 4,
     normalScale: 0.8,
-    macro: { scale: 0.07, albedo: 0.11, rough: 0.07, grime: 0.06 },
+    macro: { scale: 0.07, albedo: 0.11, rough: 0.07, grime: 0.06, patch: 0.14, patchFreq: 0.22, runs: 0.1 },
     build(b) {
       const drift = b.fbm({ freq: 3, octaves: 4, seed: 19 });
       const grain = b.fbm({ freq: 48, octaves: 2, seed: 23 });
@@ -429,8 +436,8 @@ export const MATERIAL_RECIPES = {
     tile: 1.5,
     uvScale: 2,
     normalScale: 0.4,
-    macro: { scale: 0.09, albedo: 0.07, rough: 0.1, grime: 0.14 },
-    mat: { envMapIntensity: 1.2 },
+    macro: { scale: 0.09, albedo: 0.07, rough: 0.1, grime: 0.14, patch: 0.06, patchFreq: 0.9, runs: 0.16 },
+    mat: { envMapIntensity: 1.5 },
     build(b) {
       // Brushing is anisotropic by definition: the same field sampled ~40:1
       // across versus along the grain. Isotropic noise on metal never reads as
@@ -448,7 +455,11 @@ export const MATERIAL_RECIPES = {
         b.height[i] = 0.55 + (brush[i] - 0.5) * 0.14 + (fine[i] - 0.5) * 0.06 - ding * 0.4;
         b.rgb(i, ...steel);
         b.scale(i, 0.92 + brush[i] * 0.16 - ding * 0.2);
-        b.rough[i] = rgh(0.2 + brush[i] * 0.22 + fine[i] * 0.06 + ding * 0.25);
+        // Tight enough to hold a highlight on a 5 cm tube. Brushed steel at 0.4
+        // roughness has a lobe wider than a railing is thick, so every tap of the
+        // env map lands on the same value and the tube renders as a flat line —
+        // which is exactly how a pipe stops reading as metal.
+        b.rough[i] = rgh(0.13 + brush[i] * 0.15 + fine[i] * 0.05 + ding * 0.3);
         // Metal, so metalness 1 and no diffuse: the colour lives in the specular.
         b.metal[i] = 1 - ding * 0.2;
       });
@@ -459,17 +470,18 @@ export const MATERIAL_RECIPES = {
     tile: 2,
     uvScale: 2.5,
     normalScale: 1.4,
-    macro: { scale: 0.055, albedo: 0.15, rough: 0.1, grime: 0.2, tint: 0x5a3a24 },
+    macro: { scale: 0.055, albedo: 0.15, rough: 0.1, grime: 0.2, tint: 0x5a3a24, patch: 0.15, patchFreq: 0.85, runs: 0.42, runFreq: 2.1 },
+    mat: { envMapIntensity: 1.35 },
     build(b) {
       const bloom = b.warp(b.fbm({ freq: 4, octaves: 5, seed: 3 }), { freq: 2, amount: b.size * 0.07 });
       const flake = b.fbm({ freq: 26, octaves: 4, seed: 81 });
       const runs = b.fbm({ freq: 22, freqY: 3, octaves: 4, seed: 17 });
       const pit = b.cells({ freq: 18, jitter: 1, mode: 'f1', seed: 5 });
       const pitId = b.cells({ freq: 18, jitter: 1, mode: 'id', seed: 5 });
-      const bare = lin(0x71767a);
-      const rustA = lin(0x7d4522);
-      const rustB = lin(0x93552a);
-      const rustC = lin(0x3f261a);
+      const bare = lin(0x8a9096);
+      const rustA = lin(0x8e441b);
+      const rustB = lin(0xa85f28);
+      const rustC = lin(0x402413);
       b.normalStrength = 1.3;
       b.aoRelief = 0.6;
       b.each((i) => {
@@ -483,10 +495,14 @@ export const MATERIAL_RECIPES = {
         c = mixc(c, mixc(rustA, rustB, flake[i]), hard);
         c = mixc(c, rustC, hard * smoothstep(0.55, 0.15, flake[i]) * 0.8);
         b.rgb(i, ...c);
-        b.rough[i] = rgh(0.3 + flake[i] * 0.08 + hard * 0.6);
-        // Iron oxide is not a metal. Dropping metalness in the rust is what
-        // makes the corroded area stop mirroring the sky.
-        b.metal[i] = 1 - hard * 0.88;
+        // The bare steel between the blooms has to stay tight: on a 7 cm stall
+        // pole almost the whole silhouette is that steel, and it is the only thing
+        // that can carry a highlight down the length of the tube.
+        b.rough[i] = rgh(0.19 + flake[i] * 0.07 + hard * 0.56);
+        // Iron oxide is not a metal, but a rusted pole that drops to metalness 0.1
+        // has no specular left at all and reads as terracotta. Compact oxide over
+        // steel keeps some of it, so the floor is 0.28 rather than zero.
+        b.metal[i] = 1 - hard * 0.72;
         b.aoMul[i] = 1 - hard * 0.15;
       });
     },
@@ -496,7 +512,11 @@ export const MATERIAL_RECIPES = {
     tile: 2,
     uvScale: 2.5,
     normalScale: 1.0,
-    macro: { scale: 0.07, albedo: 0.12, rough: 0.1, grime: 0.2 },
+    macro: { scale: 0.07, albedo: 0.12, rough: 0.1, grime: 0.2, patch: 0.12, patchFreq: 0.9, runs: 0.34, runFreq: 2.2 },
+    // Industrial enamel over steel is a gloss coat, and the env map is where its
+    // highlight comes from. Without this the top rail of a balcony railing has no
+    // specular event anywhere along its run.
+    mat: { envMapIntensity: 1.45 },
     build(b) {
       // The chip outline is warped so it is not a disc; the id field decides
       // which cells have lost paint at all.
@@ -516,13 +536,22 @@ export const MATERIAL_RECIPES = {
         // with it. This is the "sharp roughness break at a chipped edge" case.
         const inside = chipId[i] > 0.58 ? smoothstep(0.26, 0.2, chips[i]) : 0;
         const rim = chipId[i] > 0.58 ? smoothstep(0.2, 0.3, chips[i]) * smoothstep(0.36, 0.28, chips[i]) : 0;
+        // Hands, sleeves and weather burnish a railing along the scratch grain
+        // until the paint film there is polished rather than merely intact.
+        const burnish = smoothstep(0.55, 0.95, scratch[i]);
         b.height[i] = 0.66 - inside * 0.3 + (orange[i] - 0.5) * 0.06 - scratch[i] * 0.04;
         let c = mixc(paint, paint2, orange[i]);
         c = mixc(c, iron, inside);
         c = mixc(c, rust, rim * 0.8 + inside * orange[i] * 0.35);
         b.rgb(i, ...c);
-        b.rough[i] = rgh((1 - inside) * (0.4 + orange[i] * 0.1) + inside * 0.34 + rim * 0.5 + scratch[i] * 0.05);
-        b.metal[i] = inside * 0.9 * (1 - rim * 0.6);
+        b.rough[i] = rgh(
+          (1 - inside) * (0.26 + orange[i] * 0.09 - burnish * 0.1) + inside * 0.24 + rim * 0.45 + scratch[i] * 0.04
+        );
+        // Paint is a dielectric, so its own metalness stays 0 — but where the film
+        // has burnished thin the steel underneath starts to show through, and that
+        // partial metal is what gives the polished stretches a coloured highlight
+        // instead of a white one.
+        b.metal[i] = clamp01(inside * 0.9 * (1 - rim * 0.6) + burnish * 0.3 * (1 - inside));
         b.aoMul[i] = 1 - inside * 0.2;
       });
     },
@@ -532,8 +561,8 @@ export const MATERIAL_RECIPES = {
     tile: 1.5,
     uvScale: 2,
     normalScale: 0.45,
-    macro: { scale: 0.1, albedo: 0.06, rough: 0.12, grime: 0.12 },
-    mat: { envMapIntensity: 1.25 },
+    macro: { scale: 0.1, albedo: 0.06, rough: 0.12, grime: 0.12, patch: 0.05, patchFreq: 1.0, runs: 0.14 },
+    mat: { envMapIntensity: 1.5 },
     build(b) {
       const swirl = b.warp(b.fbm({ freq: 4, freqY: 48, octaves: 3 }), { freq: 5, amount: b.size * 0.05 });
       const scuff = b.fbm({ freq: 24, octaves: 3, seed: 71 });
@@ -547,7 +576,7 @@ export const MATERIAL_RECIPES = {
         b.scale(i, 0.94 + scuff[i] * 0.1);
         // Scuffing is directional abrasion over a polished base, so most of the
         // surface stays tight and the scuffs are the rough minority.
-        b.rough[i] = rgh(0.22 + swirl[i] * 0.3 + scuff[i] * 0.1 + gouge[i] * 0.18);
+        b.rough[i] = rgh(0.14 + swirl[i] * 0.24 + scuff[i] * 0.09 + gouge[i] * 0.18);
         b.metal[i] = 1;
       });
     },
@@ -557,7 +586,7 @@ export const MATERIAL_RECIPES = {
     tile: 2.5,
     uvScale: 2,
     normalScale: 1.1,
-    macro: { scale: 0.06, albedo: 0.12, rough: 0.1, grime: 0.22, tint: 0x6a4a2c },
+    macro: { scale: 0.06, albedo: 0.12, rough: 0.1, grime: 0.22, tint: 0x6a4a2c, patch: 0.14, patchFreq: 0.75, runs: 0.5, runFreq: 2.4 },
     build(b) {
       const spangle = b.cells({ freq: 22, mode: 'id', seed: 12 });
       const rustF = b.fbm({ freq: 13, freqY: 3, octaves: 4, seed: 88 });
@@ -594,7 +623,7 @@ export const MATERIAL_RECIPES = {
     tile: 2,
     uvScale: 2,
     normalScale: 1.15,
-    macro: { scale: 0.06, albedo: 0.14, rough: 0.1, grime: 0.24, tint: 0x554836 },
+    macro: { scale: 0.06, albedo: 0.14, rough: 0.1, grime: 0.24, tint: 0x554836, patch: 0.14, patchFreq: 0.85, runs: 0.28, runFreq: 2.2 },
     build(b) {
       const grain = b.warp(b.fbm({ freq: 3, freqY: 64, octaves: 5 }), { freq: 4, amount: b.size * 0.02 });
       const fibre = b.fbm({ freq: 8, freqY: 120, octaves: 2, seed: 51 });
@@ -647,7 +676,7 @@ export const MATERIAL_RECIPES = {
     tile: 2.4,
     uvScale: 2.5,
     normalScale: 0.5,
-    macro: { scale: 0.07, albedo: 0.12, rough: 0.09, grime: 0.2, tint: 0x5b4c36 },
+    macro: { scale: 0.07, albedo: 0.12, rough: 0.09, grime: 0.2, tint: 0x5b4c36, patch: 0.13, patchFreq: 0.9, runs: 0.26 },
     build(b) {
       // Rotary-cut veneer: wide, cathedral-shaped figure, and almost no relief
       // because the sheet is sanded flat. Distinct from plank in every axis.
@@ -678,27 +707,38 @@ export const MATERIAL_RECIPES = {
   /* ------------------------------------------------------- soft surfaces */
 
   sandbag_canvas: {
-    tile: 1,
+    // 1.6 m per tile, not 1: at the level's density that put the weave at 1.3 cm,
+    // which is a third of a pixel on a bag three metres away — so a course of
+    // sandbags averaged out to flat grey however carefully the weave was authored.
+    // The weave is the micro layer here; what has to survive to 10 m is the fold
+    // and seam relief, and both are authored an order of magnitude larger.
+    tile: 1.6,
     uvScale: 3,
-    normalScale: 1.5,
+    normalScale: 1.7,
     physical: true,
-    mat: { sheen: 0.35, sheenRoughness: 0.85, sheenColor: new THREE.Color(0xcbb98d) },
-    macro: { scale: 0.14, albedo: 0.13, rough: 0.08, grime: 0.3, tint: 0x6a5c3f },
+    mat: { sheen: 0.4, sheenRoughness: 0.8, sheenColor: new THREE.Color(0xd8c398) },
+    macro: { scale: 0.34, albedo: 0.15, rough: 0.08, grime: 0.24, tint: 0x6a5c3f, patch: 0.18, patchFreq: 1.6, runs: 0.2, runFreq: 3.2 },
     build(b) {
-      const fuzz = b.fbm({ freq: 44, octaves: 3 });
-      const bulge = b.fbm({ freq: 2, octaves: 3, seed: 15 });
-      const dust = b.fbm({ freq: 12, octaves: 4, seed: 62 });
-      const jute = lin(0x9d8759);
-      const jute2 = lin(0x7d6a44);
-      const grime = lin(0x6a604b);
-      b.normalStrength = 1.4;
-      b.aoRelief = 0.8;
-      b.aoSpread = 0.03;
+      const fuzz = b.fbm({ freq: 34, octaves: 3 });
+      // Folds are the read at every distance a sandbag is seen from: a filled bag
+      // is a slack sack, and the creases where the cloth gathers are 10 cm long,
+      // not 1 cm. Ridged and warped so they branch and taper like fabric instead
+      // of pooling like noise.
+      const folds = b.warp(b.ridge({ freq: 3.5, octaves: 3, seed: 15 }), { freq: 3, amount: b.size * 0.07 });
+      const slack = b.fbm({ freq: 2, octaves: 3, seed: 51 });
+      const dust = b.fbm({ freq: 9, octaves: 4, seed: 62 });
+      const jute = lin(0xa2814a);
+      const jute2 = lin(0x796038);
+      const bleach = lin(0xc2a978);
+      const grime = lin(0x5d5340);
+      b.normalStrength = 1.6;
+      b.aoRelief = 1.0;
+      b.aoSpread = 0.05;
       b.each((i, u, v) => {
         // Plain weave: alternating cells decide which thread is on top, and each
         // thread's cross-section is a half-sine. That interlock is what makes
         // burlap read as woven rather than as bumpy.
-        const T = 22;
+        const T = 16;
         const tx = u * T;
         const ty = v * T;
         const cx = Math.floor(tx);
@@ -707,18 +747,31 @@ export const MATERIAL_RECIPES = {
         const py = Math.sin(Math.PI * (ty - cy));
         const warpTop = ((cx + cy) & 1) === 0;
         const w = warpTop ? px * 0.9 + py * 0.2 : py * 0.9 + px * 0.2;
-        b.height[i] = 0.3 + w * 0.36 + bulge[i] * 0.2 + (fuzz[i] - 0.5) * 0.07;
+        // The sewn edge: a raised welt with the cloth gathered and pinched either
+        // side of it. One per tile, and it is the only straight line on an
+        // otherwise entirely soft object — which is what makes the object read as
+        // a sewn bag rather than as a smooth ellipsoid.
+        const sv = Math.abs(tri(v * 0.5) - 1);
+        const welt = smoothstep(0.05, 0.012, sv);
+        const gather = smoothstep(0.11, 0.05, sv) * (1 - welt);
+        const crease = smoothstep(0.5, 0.86, folds[i]);
+        b.height[i] =
+          0.34 + w * 0.16 + slack[i] * 0.26 + (fuzz[i] - 0.5) * 0.05 - crease * 0.34 + welt * 0.22 - gather * 0.14;
         // Tone belongs to the thread, not to the cell: jute is spun in uneven
         // hanks, so the colour runs the length of each strand. Keying off cell
         // parity instead gives a checkerboard, which no woven thing has.
         let c = mixc(jute, jute2, warpTop ? hash01(cx, 5.7) * 0.7 : 0.25 + hash01(cy, 11.3) * 0.7);
-        c = mixc(c, grime, clamp01(dust[i] * 1.2 - 0.25) * (1 - w * 0.6));
+        // Sun bleaches the parts that stand proud and dirt collects in the creases:
+        // that pairing is what gives a khaki bag its chroma range instead of one
+        // flat tint, which is the reading that made these look like grey plastic.
+        c = mixc(c, bleach, smoothstep(0.45, 0.95, slack[i]) * 0.55 + welt * 0.25);
+        c = mixc(c, grime, clamp01(dust[i] * 1.2 - 0.25) * (1 - w * 0.5) * 0.8 + crease * 0.45);
         b.rgb(i, ...c);
-        b.scale(i, 0.86 + fuzz[i] * 0.28);
+        b.scale(i, 0.84 + fuzz[i] * 0.24 + slack[i] * 0.12);
         // Thread crowns are abraded smooth by handling; the interstices hold
         // dust and stay maximally rough.
-        b.rough[i] = rgh(0.95 - smoothstep(0.5, 1, w) * 0.14 + (fuzz[i] - 0.5) * 0.08);
-        b.aoMul[i] = 1 - (1 - clamp01(w)) * 0.35;
+        b.rough[i] = rgh(0.95 - smoothstep(0.5, 1, w) * 0.14 - welt * 0.1 + crease * 0.04 + (fuzz[i] - 0.5) * 0.08);
+        b.aoMul[i] = 1 - (1 - clamp01(w)) * 0.25 - crease * 0.4 - gather * 0.2;
       });
     },
   },
@@ -729,7 +782,7 @@ export const MATERIAL_RECIPES = {
     normalScale: 0.85,
     physical: true,
     mat: { sheen: 0.3, sheenRoughness: 0.7, sheenColor: new THREE.Color(0xa8a487) },
-    macro: { scale: 0.16, albedo: 0.1, rough: 0.07, grime: 0.18, tint: 0x5b5540 },
+    macro: { scale: 0.16, albedo: 0.1, rough: 0.07, grime: 0.18, tint: 0x5b5540, patch: 0.1, patchFreq: 1.4, runs: 0.18 },
     build(b) {
       const blob = b.warp(b.fbm({ freq: 3, octaves: 4 }), { freq: 4, amount: b.size * 0.06 });
       const blob2 = b.warp(b.fbm({ freq: 5, octaves: 4, seed: 44 }), { freq: 3, amount: b.size * 0.05 });
@@ -766,7 +819,7 @@ export const MATERIAL_RECIPES = {
     tile: 1,
     uvScale: 4,
     normalScale: 1.2,
-    macro: { scale: 0.2, albedo: 0.08, rough: 0.09, grime: 0.16 },
+    macro: { scale: 0.2, albedo: 0.08, rough: 0.09, grime: 0.16, patch: 0.08, patchFreq: 1.6, runs: 0.12 },
     build(b) {
       const micro = b.fbm({ freq: 46, octaves: 2 });
       const bloom = b.fbm({ freq: 9, octaves: 4, seed: 39 });
@@ -805,7 +858,7 @@ export const MATERIAL_RECIPES = {
       side: THREE.DoubleSide,
       depthWrite: false,
     },
-    macro: { scale: 0.3, albedo: 0.05, rough: 0.1, grime: 0.08 },
+    macro: { scale: 0.3, albedo: 0.05, rough: 0.1, grime: 0.08, patch: 0.06, patchFreq: 1.2, runs: 0.3, runFreq: 2.6 },
     build(b) {
       const film = b.warp(b.fbm({ freq: 7, octaves: 5 }), { freq: 3, amount: b.size * 0.05 });
       const runs = b.fbm({ freq: 26, freqY: 3, octaves: 3, seed: 61 });
@@ -835,7 +888,7 @@ export const MATERIAL_RECIPES = {
     tile: 0.3,
     uvScale: 6,
     normalScale: 0.85,
-    macro: { scale: 1.6, albedo: 0.05, rough: 0.05, grime: 0 },
+    macro: false,
     build(b) {
       const stip = b.cells({ freq: 40, mode: 'dome', jitter: 1, seed: 4 });
       const flow = b.fbm({ freq: 9, octaves: 4, seed: 66 });
@@ -862,7 +915,7 @@ export const MATERIAL_RECIPES = {
     tile: 0.3,
     uvScale: 6,
     normalScale: 0.35,
-    macro: { scale: 1.8, albedo: 0.04, rough: 0.04, grime: 0 },
+    macro: false,
     mat: { envMapIntensity: 1.3 },
     build(b) {
       const turn = b.fbm({ freq: 3, freqY: 96, octaves: 2 });
@@ -890,7 +943,7 @@ export const MATERIAL_RECIPES = {
     tile: 0.3,
     uvScale: 6,
     normalScale: 0.4,
-    macro: { scale: 1.8, albedo: 0.04, rough: 0.05, grime: 0 },
+    macro: false,
     mat: { envMapIntensity: 1.25 },
     build(b) {
       const blast = b.fbm({ freq: 40, octaves: 2 });
@@ -923,7 +976,7 @@ export const MATERIAL_RECIPES = {
       sheenColor: new THREE.Color(0xffcdb2),
       envMapIntensity: 0.9,
     },
-    macro: { scale: 2.2, albedo: 0.05, rough: 0.05, grime: 0 },
+    macro: false,
     build(b) {
       const pores = b.cells({ freq: 46, jitter: 1, mode: 'f1', seed: 17 });
       const creases = b.warp(b.fbm({ freq: 7, freqY: 18, octaves: 4, seed: 5 }), { freq: 5, amount: b.size * 0.02 });
@@ -1029,9 +1082,21 @@ export const MATERIAL_ALIASES = {
   anodised: 'gun_aluminium_anodized',
   rail: 'gun_aluminium_anodized',
   optic: 'gun_aluminium_anodized',
+  handguard: 'gun_aluminium_anodized',
+  bolt: 'gun_steel_blued',
+  muzzle: 'gun_steel_blued',
+  suppressor: 'gun_steel_blued',
+  magazine: 'gun_polymer',
+  mag: 'gun_polymer',
+  stock: 'gun_polymer',
+  lens: 'glass_dirty',
+  buttpad: 'rubber',
+  sleeve: 'camo_fabric',
+  glove: 'camo_fabric',
   skin: 'skin',
   hand: 'skin',
   hands: 'skin',
+  forearm: 'skin',
   flesh: 'skin',
   face: 'skin',
 };

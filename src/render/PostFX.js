@@ -890,14 +890,16 @@ export class PostFX {
         //
         // 1.25 measures as a 20% fall into a wall's floor junction, against a factor
         // of two for the contact pass on a crate, and 1.7 was tried to close that
-        // gap. It does not pay: the frame it costs most is a market awning, whose
-        // underside is enclosed by posts, table and ground and therefore reads as
-        // deeply occluded, when physically most of what its hemisphere contains is
-        // sunlit ground *bouncing light up into it*. Occlusion applied to one
-        // composited radiance cannot tell an occluder from a source, so every stop
-        // taken there is taken from bounce that should be arriving — measured as the
-        // canopy's own texture variance collapsing from sd 10.5 to 3.2. The wide
-        // term's job is the gradient, not the depth; uWideFloor bounds the rest.
+        // gap. It changes less than it looks like it should: a market awning's
+        // underside, the most enclosed surface in the five review poses, measures
+        // identically under both (mean 25.9, sd 3.2) because its raw visibility is
+        // already below uWideFloor, and the exponent cannot reach what the floor has
+        // clamped. So the exponent only ever moves the middle of the band, and no
+        // pose in the set showed that middle needing more than 1.25 buys. Deepening
+        // the enclosed end is uWideFloor's decision, and it is deliberately bounded:
+        // occlusion multiplied into one composited radiance cannot tell an occluder
+        // from a source, and most of what an awning's hemisphere holds is sunlit
+        // ground bouncing light back up into it.
         scale: 1.25,
         samples: software ? 9 : 12,
         screenSpaceRadius: false,

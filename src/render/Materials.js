@@ -242,6 +242,11 @@ export const MATERIAL_RECIPES = {
       // through a tight threshold — irregular outline, ragged rim.
       const peel = b.warp(b.fbm({ freq: 6, octaves: 4, seed: 909 }), { freq: 13, amount: b.size * 0.022 });
       const cracks = b.ridge({ freq: 4, octaves: 5, seed: 17 });
+      // Crack damage is regional. A ridge network left ungated covers every square
+      // metre of every wall in the town at the same density, and a pattern that
+      // uniform stops reading as cracking and starts reading as wallpaper — which
+      // is exactly what it did once the peel blotches were no longer hiding it.
+      const zone = b.warp(b.fbm({ freq: 3, octaves: 3, seed: 421 }), { freq: 2, amount: b.size * 0.08 });
       const paint = lin(0xb6b9ae);
       // Only 20 levels below the paint, not 40. Lime plaster under limewash is
       // barely darker than the wash — what actually distinguishes them is sheen.
@@ -260,10 +265,13 @@ export const MATERIAL_RECIPES = {
         // a painted wall, and at a third of the surface they stop being damage and
         // become the pattern.
         const bare = smoothstep(0.7, 0.755, peel[i] + (trowel[i] - 0.5) * 0.18);
-        const crack = smoothstep(0.55, 0.85, cracks[i]);
-        b.height[i] = 0.58 + (trowel[i] - 0.5) * 0.14 + (stipple[i] - 0.5) * 0.05 - bare * 0.06 - crack * 0.3;
+        // A crack in a paint film is a line, not a channel: the threshold is high
+        // and narrow so only the ridge crest survives, and the regional gate keeps
+        // whole stretches of wall intact.
+        const crack = smoothstep(0.76, 0.94, cracks[i]) * smoothstep(0.46, 0.68, zone[i]);
+        b.height[i] = 0.58 + (trowel[i] - 0.5) * 0.14 + (stipple[i] - 0.5) * 0.05 - bare * 0.06 - crack * 0.22;
         let c = mixc(paint, under, bare);
-        c = mixc(c, lin(0x77705f), crack * 0.6);
+        c = mixc(c, lin(0x8a8271), crack * 0.75);
         b.rgb(i, ...c);
         b.scale(i, 0.94 + trowel[i] * 0.12);
         b.rough[i] = rgh((1 - bare) * (0.36 + stipple[i] * 0.1) + bare * 0.9 + crack * 0.2);

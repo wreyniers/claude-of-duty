@@ -57,11 +57,11 @@ import { Props } from './Props.js';
  * chippings at 5 cm, corrugation pitch at 7 cm, jute weave at 1 cm.
  */
 const TILE_MULT = {
-  concrete_cast: 2.2,
-  concrete_pitted: 2.6,
-  brick_red: 2.2,
-  plaster_painted: 2.1,
-  tile_ceramic: 1.3,
+  concrete_cast: 3.0,
+  concrete_pitted: 3.2,
+  brick_red: 2.6,
+  plaster_painted: 3.2,
+  tile_ceramic: 1.6,
   asphalt: 2.6,
   dirt_packed: 2.2,
   gravel: 2.2,
@@ -344,7 +344,10 @@ export class Level {
       // No ceiling slab: the collapsed roof corner has to be a hole to the sky,
       // which is where the interior pose gets its second light source.
       topSlab: false,
-      floorMat: 'tile_ceramic',
+      // Dust-covered screed, not glazed tile. A white gloss floor was both the
+      // brightest thing in the interior frame and the wrong century.
+      floorMat: 'concrete_cast',
+      floorTint: new THREE.Color(0xb0a696),
       roof: { parapet: 0.66, collapsed: { x: -3.2, z: -3.6, w: 3.8, d: 3.6 } },
     });
 

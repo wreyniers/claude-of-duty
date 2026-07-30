@@ -977,15 +977,21 @@ export class Kit {
   plasterLoss(e, m, cx, cy, w, h, T) {
     const rng = this.rng;
     const M = new THREE.Matrix4();
-    for (let i = 0; i < 3; i++) {
-      const pw = w * rng.range(0.45, 0.95);
-      const ph = h * rng.range(0.4, 0.9);
-      const px = cx + rng.range(-w * 0.22, w * 0.22);
-      const py = cy + rng.range(-h * 0.22, h * 0.22);
-      M.makeTranslation(px, py, T / 2 - 0.012).premultiply(m);
-      e.add('brick_red', this.box(pw, ph, 0.03, 1.1), M, {});
-      M.makeTranslation(px, py + ph / 2, T / 2 + 0.004).premultiply(m);
-      e.add('plaster_painted', this.chamfer(pw * rng.range(0.7, 1), 0.07, 0.035, 0.012), M, {});
+    // Four smaller patches rather than three big ones, each with a proud torn
+    // lip along its top edge, and the brick weathered down: a full-size clean
+    // rectangle of new brick reads as a poster stuck to the wall.
+    const brick = new THREE.Color(0x9a8b7e);
+    for (let i = 0; i < 4; i++) {
+      const pw = w * rng.range(0.3, 0.62);
+      const ph = h * rng.range(0.26, 0.6);
+      const px = cx + rng.range(-w * 0.3, w * 0.3);
+      const py = cy + rng.range(-h * 0.3, h * 0.3);
+      M.makeTranslation(px, py, T / 2 - 0.014).premultiply(m);
+      e.add('brick_red', this.box(pw, ph, 0.032, 0.9), M, { tint: brick });
+      for (const sy of [1, -1]) {
+        M.makeTranslation(px + rng.range(-0.1, 0.1), py + (sy * ph) / 2, T / 2 + 0.006).premultiply(m);
+        e.add('plaster_painted', this.chamfer(pw * rng.range(0.65, 1.05), 0.06, 0.032, 0.01), M, {});
+      }
     }
   }
 
@@ -1469,7 +1475,7 @@ export class Kit {
     e.add(spec.ceilMat ?? 'concrete_pitted', this.box(L, 0.24, D, 2), C, { tint, grime: 0 });
     e.collide(L, 0.24, D, C);
     const F = new THREE.Matrix4().makeTranslation(0, 0.06, -D / 2).premultiply(m);
-    e.add(spec.floorMat ?? 'tile_ceramic', this.box(L - 0.4, 0.12, D, 1.6), F, { grime: 0.4 });
+    e.add(spec.floorMat ?? 'concrete_cast', this.box(L - 0.4, 0.12, D, 1.6), F, { grime: 0.5 });
     e.collide(L - 0.4, 0.12, D, F);
   }
 }

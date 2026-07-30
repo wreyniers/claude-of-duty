@@ -25,11 +25,12 @@ import { MotionBlurShader, VELOCITY_GLSL } from './shaders/MotionBlurShader.js';
  *   gradeName                    -> the active preset name
  *   depthTexture                 -> scene depth, for anything else that needs it
  *   rebuild()                    re-derive the chain from Settings
- *   stats                        -> { initMs, passes, ao, ssr, taa, smaa, bloom, mb }
+ *   stats                        -> { initMs, passes, ao, aoWide, ssr, taa, smaa, bloom, mb }
  *
  * ORDER, AND WHY
  *   scene -> half-float HDR (its own target, so depth is isolated)
- *   GTAO            ambient occlusion, multiplied in while still linear
+ *   GTAO x2         ambient occlusion at contact scale and at room scale
+ *   AO composite    both scales resolved into one factor, multiplied in linear
  *   SSR             grazing-angle reflections on near-horizontal surfaces
  *   TAA             jitter accumulate + neighbourhood-clamped history
  *   motion blur     camera velocity from depth + last frame's view-projection
@@ -49,6 +50,90 @@ import { MotionBlurShader, VELOCITY_GLSL } from './shaders/MotionBlurShader.js';
  * framebuffer it is writing to — a feedback loop ANGLE reports as a console
  * error, which fails a capture run outright.
  */
+
+/**
+ * Two occlusion scales resolved into one factor, multiplied into the still-linear
+ * frame.
+ *
+ * A single GTAO pass answers at a single scale. A 0.9 m kernel is the right answer
+ * for where a crate meets the ground and no answer at all for a room: the corner
+ * where two walls meet, the reveal of a window, the soffit between ceiling joists
+ * are each several metres of blocked hemisphere, and a metre-wide radius measures
+ * none of it. That is why an interior lit through two small openings came out as
+ * bright as the street outside, with its corners *brighter* than its walls — the
+ * sky fill and the IBL reach every surface in there unattenuated, and nothing in
+ * the chain was measuring that they should not.
+ *
+ * The two scales are combined by taking the darker, not by multiplying. The wide
+ * radius contains the narrow one, so they are two estimates of the same hemisphere
+ * integral rather than two independent factors; multiplying counts the same wall
+ * twice and turns every junction into a black line.
+ *
+ * The physically honest version of this attenuates the ambient/IBL diffuse term
+ * alone, because that is the light occlusion actually blocks. Nothing downstream
+ * of the scene render can: this pass is handed one composited radiance with the
+ * sun already in it. Bounding how far the wide term can darken (uWideFloor) and
+ * fading it out past a few room lengths is what keeps that approximation from
+ * reading as dirt on sunlit geometry.
+ */
+const AOCompositeShader = {
+  name: 'AOCompositeShader',
+  uniforms: {
+    tDiffuse: { value: null },
+    tAoNear: { value: null },
+    tAoWide: { value: null },
+    tDepth: { value: null },
+    uCamPlanes: { value: null },
+    uStrength: { value: 0.95 },
+    uWide: { value: 0.9 },
+    uWideFloor: { value: 0.15 },
+    uFade: { value: null }, // metres: the wide term fades out between x and y
+  },
+  vertexShader: /* glsl */ `
+varying vec2 vUv;
+void main() {
+	vUv = uv;
+	gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+}
+`,
+  fragmentShader: /* glsl */ `
+varying vec2 vUv;
+
+uniform sampler2D tDiffuse;
+uniform sampler2D tAoNear;
+uniform sampler2D tAoWide;
+uniform sampler2D tDepth;
+uniform vec2 uCamPlanes;
+uniform float uStrength;
+uniform float uWide;
+uniform float uWideFloor;
+uniform vec2 uFade;
+
+void main() {
+	vec4 src = texture2D( tDiffuse, vUv );
+
+	// Both AO targets clear to white, but they are smaller than the frame, so a
+	// bilinear tap on a roofline drags occlusion out into the sky. The sky has no
+	// surface to occlude, so it is gated on the full-resolution depth.
+	float d = texture2D( tDepth, vUv ).x;
+	if ( d >= 0.999995 ) { gl_FragColor = src; return; }
+
+	float dist = ( uCamPlanes.x * uCamPlanes.y ) / ( uCamPlanes.y - ( uCamPlanes.y - uCamPlanes.x ) * d );
+
+	float near = texture2D( tAoNear, vUv ).r;
+	float wide = max( texture2D( tAoWide, vUv ).r, uWideFloor );
+	// The far band's radiance is mostly in-scattered air by then, and air in front
+	// of a surface is not occluded by that surface's neighbours — so the further out
+	// a pixel is, the less of it this term has any business darkening. The fade
+	// therefore tracks the aerial term's own crossover rather than the kernel's
+	// screen size, which stays several tens of pixels well past 100 m.
+	wide = mix( wide, 1.0, smoothstep( uFade.x, uFade.y, dist ) );
+
+	float vis = min( near, mix( 1.0, wide, uWide ) );
+	gl_FragColor = vec4( src.rgb * mix( 1.0, vis, uStrength ), src.a );
+}
+`,
+};
 
 /**
  * Screen-space reflections, gated geometrically rather than by material.
@@ -579,10 +664,26 @@ export class PostFX {
      */
     this.shaftStrength = 0.15;
 
+    /**
+     * Airlight path density for the shaft term, as a multiple of the sky's own
+     * `aerialDensity`. A shaft is in-scattered sunlight crossing the same air the
+     * aerial term integrates, so the two cannot hold independent opinions about how
+     * much air sits in front of a surface — the hard-coded 1/45 m this replaces
+     * disagreed with the active preset by a factor of four, and would have kept
+     * disagreeing by a different factor in every other weather. The multiplier is
+     * the one honest difference between them: a beam is only visible in the
+     * particulate near the ground, which is denser than the clean column an aerial
+     * average assumes, and it now tracks the preset — `dust` doubles the density and
+     * the beams saturate over half the distance with it.
+     */
+    this.shaftDust = 4.0;
+
     this.composer = null;
     this.sceneTarget = null;
     this.depthTexture = null;
     this.ao = null;
+    this.aoWide = null;
+    this.aoComposite = null;
     this.ssr = null;
     this.taa = null;
     this.motionBlur = null;
@@ -591,7 +692,7 @@ export class PostFX {
     this.gradePass = null;
     this.smaa = null;
 
-    this.stats = { initMs: 0, passes: 0, ao: false, ssr: false, taa: false, smaa: false, bloom: false, mb: false, shafts: false };
+    this.stats = { initMs: 0, passes: 0, ao: false, aoWide: false, ssr: false, taa: false, smaa: false, bloom: false, mb: false, shafts: false };
 
     // Shared uniform values. The same objects are bound into several passes so one
     // write per frame reaches all of them; update() must not allocate.
@@ -609,6 +710,7 @@ export class PostFX {
     this._sunUv = new THREE.Vector2(0.5, 0.5);
     this._sunClip = new THREE.Vector4();
     this._camPlanes = new THREE.Vector2(0.08, 900);
+    this._aoFade = new THREE.Vector2(90, 260);
 
     this._projClean = new THREE.Matrix4();
     this._viewProjClean = new THREE.Matrix4();
@@ -697,12 +799,11 @@ export class PostFX {
     }
 
     if (settings.ao) {
-      // Radius in metres. The default 0.25 is tuned for a desk-scale demo; at a
-      // 1.8 m eye height that darkens nothing but the seam itself. The scale that
-      // matters here is architectural — a doorway reveal, the underside of a
-      // balcony, the corner where two walls meet — so the radius has to be a
-      // fraction of a room, and `thickness` has to grow with it or a railing
-      // starts occluding the wall a metre behind it.
+      // Contact scale. Radius in metres; the default 0.25 is tuned for a desk-scale
+      // demo and at a 1.8 m eye height darkens nothing but the seam itself. 0.9 m
+      // is where an object meets the ground, a plank crosses a wall, rubble piles
+      // against a kerb — the high-frequency half of the signal, run at close to
+      // full resolution because that is the half with edges in it.
       const ao = new ScaledGTAOPass(scene, camera, w, h, software ? 0.7 : 1);
       // Reuse the scene depth instead of re-rendering the world into a private
       // G-buffer: one less full-scene pass, and the normals derived from this
@@ -718,9 +819,56 @@ export class PostFX {
         screenSpaceRadius: false,
       });
       ao.updatePdMaterial({ lumaPhi: 12, depthPhi: 1.4, normalPhi: 3.5, radius: 5, samples: software ? 8 : 12, rings: 2, radiusExponent: 1.6 });
-      ao.blendIntensity = 0.95;
+      // Neither pass composites itself. One shader resolves both scales, which is
+      // also one full-screen blit cheaper than GTAOPass' own copy-then-blend.
+      ao.output = GTAOPass.OUTPUT.Off;
+      ao.needsSwap = false;
       this.ao = ao;
       this.composer.addPass(ao);
+
+      // Room scale: the architectural half of the signal — wall corners, window
+      // reveals, the underside of a balcony, the ceiling between joists. A quarter
+      // of the frame is plenty of resolution for it, because occlusion over metres
+      // is a low-frequency field, and that is what makes a second pass affordable.
+      const wide = new ScaledGTAOPass(scene, camera, w, h, software ? 0.34 : 0.5);
+      wide.setGBuffer(this.depthTexture);
+      wide.updateGtaoMaterial({
+        radius: 4.5,
+        distanceExponent: 1.4,
+        // Thickness has to track the radius or the pass measures the same nothing
+        // the narrow one already did: it rejects any sample whose depth differs
+        // from the shading point by more than this, and a wall four metres across
+        // a room *is* four metres of depth difference. Held under the radius so a
+        // foreground silhouette cannot occlude a background a room deeper.
+        thickness: 3.4,
+        // The far samples are the entire point here, so they must not be discounted
+        // the way the contact pass discounts them.
+        distanceFallOff: 0.25,
+        // A room's worth of enclosure lands most of a frame in a narrow band of
+        // visibility — 0.55 mid-floor against 0.45 in a corner — and a linear
+        // mapping spends that as one flat dimming with no gradient in it. The
+        // exponent pulls the two apart where it matters without moving open ground,
+        // whose visibility is already 1.
+        scale: 1.25,
+        samples: software ? 9 : 12,
+        screenSpaceRadius: false,
+      });
+      wide.updatePdMaterial({ lumaPhi: 12, depthPhi: 1.2, normalPhi: 2.5, radius: 8, samples: software ? 8 : 12, rings: 2, radiusExponent: 1.4 });
+      wide.output = GTAOPass.OUTPUT.Off;
+      wide.needsSwap = false;
+      this.aoWide = wide;
+      this.composer.addPass(wide);
+
+      const aoc = new ShaderPass(AOCompositeShader);
+      aoc.material.depthTest = false;
+      aoc.material.depthWrite = false;
+      aoc.uniforms.tAoNear.value = ao.gtaoMap;
+      aoc.uniforms.tAoWide.value = wide.gtaoMap;
+      aoc.uniforms.tDepth.value = this.depthTexture;
+      aoc.uniforms.uCamPlanes.value = this._camPlanes;
+      aoc.uniforms.uFade.value = this._aoFade;
+      this.aoComposite = aoc;
+      this.composer.addPass(aoc);
     }
 
     if (settings.ssr) {
@@ -809,6 +957,7 @@ export class PostFX {
 
     this.stats.passes = this.composer.passes.length;
     this.stats.ao = !!this.ao;
+    this.stats.aoWide = !!this.aoWide;
     this.stats.ssr = !!this.ssr;
     this.stats.taa = !!this.taa;
     this.stats.smaa = !!this.smaa;
@@ -921,13 +1070,19 @@ export class PostFX {
   _updateShafts() {
     const grade = this.gradePass;
     if (!grade) return;
+
+    // Shared with the AO composite, which linearises the same depth buffer, so it
+    // is kept current whether or not the shaft pass exists.
+    this._camPlanes.set(this.game.camera.near, this.game.camera.far);
+
     const dir = this.game.sky?.sunDirection;
     if (!this.shafts || !dir) {
       grade.uniforms.uShaft.value = 0;
       return;
     }
 
-    this._camPlanes.set(this.game.camera.near, this.game.camera.far);
+    const density = this.game.sky?.params?.aerialDensity;
+    if (density > 0) grade.uniforms.uShaftPath.value = density * this.shaftDust;
 
     this._sunClip.set(dir.x, dir.y, dir.z, 0).applyMatrix4(this._viewProjClean);
     const w = this._sunClip.w;
@@ -1068,6 +1223,8 @@ export class PostFX {
     this.composer.passes.length = 0;
     this.composer = null;
     this.ao = null;
+    this.aoWide = null;
+    this.aoComposite = null;
     this.ssr = null;
     this.taa = null;
     this.motionBlur = null;

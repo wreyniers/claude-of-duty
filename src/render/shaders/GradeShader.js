@@ -88,7 +88,11 @@ export const GradeShader = {
     tShaft: { value: null },
     tDepth: { value: null },
     uShaft: { value: 0 },
-    uShaftPath: { value: 1 / 45 }, // 1/metres; the depth over which airlight saturates
+    // 1/metres; the depth over which the shaft's airlight saturates. PostFX derives
+    // this from the sky's own aerial density each frame so the two atmosphere terms
+    // cannot disagree about the air between the eye and a surface; the default is
+    // that same figure under the default weather, for anyone driving the pass alone.
+    uShaftPath: { value: 1 / 48 },
     uCamPlanes: { value: null },
 
     uExposure: { value: 1 },
@@ -242,7 +246,8 @@ void main() {
 	// In-scattered sunlight is proportional to how much air the eye ray crossed
 	// before it hit something, which is what keeps the shafts off near geometry:
 	// a surface two metres away has almost no air in front of it, the far band and
-	// the sky have all of it. Same reasoning as the aerial term in Sky, same shape.
+	// the sky have all of it. Same shape as the aerial term in Sky, and now driven
+	// off the same density, so a change of weather moves both together.
 	vec3 shaft = vec3( 0.0 );
 	if ( uShaft > 0.0 ) {
 		float d = texture2D( tDepth, vUv ).x;

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { CascadedShadows } from './CascadedShadows.js';
 
 /**
  * Sun, cascaded shadow maps, and the local light budget.
@@ -7,47 +8,454 @@ import * as THREE from 'three';
  *   addPointLight(pos, color, intensity, radius) -> light
  *   flash(pos, color, intensity, ms)   one-shot muzzle/explosion light
  *   update(dt)   re-fits shadow cascades to the camera each frame
+ *
+ * ADDITIONS (safe to rely on):
+ *   addSpotLight(pos, target, color, intensity, radius, angle, penumbra) -> light
+ *   release(light)                     hand a slot back early
+ *   csm                                the CascadedShadows instance
+ *   sun / hemi                         the sun light and the sky/ground fill
+ *   sunIntensityScale / fillScale      artistic trims, applied every frame
+ *   setShadowDistance(m) / debugCascades(bool)
+ *   stats                              { pointActive, spotActive, requests, flashes }
+ *
+ * THE LIGHT BUDGET
+ * Every light in a Three scene is a uniform slot and a per-fragment cost, and
+ * changing how many there are recompiles every material in the level. So the
+ * scene never sees more than a fixed pool: `addPointLight` hands back a real
+ * PointLight that acts as a *request* — unparented, free to move and animate —
+ * and each frame the pool is filled with the highest-scoring requests near the
+ * camera. A firefight can ask for forty lights; the GPU always sees the same
+ * eight, and the shader never recompiles.
+ *
+ * Everything the sun does is read from `game.sky` every frame rather than
+ * snapshotted, so a time-of-day change moves the sun, the shadow direction, the
+ * sky fill and the shadow tint together.
  */
 export class Lighting {
   constructor(game) {
     this.game = game;
+    this.settings = game.settings;
+
     this.sun = null;
     this.hemi = null;
+    this.csm = null;
+
+    this.sunIntensityScale = 1;
+    this.fillScale = 1;
+    // Hemisphere fill would double-count the sky if Sky also supplies an env map,
+    // so it steps back when one is present.
+    this.iblFillFactor = 0.45;
+
+    const soft = game.forge?.softwareGL === true;
+    this.maxPointLights = soft ? 4 : 8;
+    this.maxSpotLights = soft ? 2 : 3;
+    this.maxRequests = 48;
+    // A light whose sphere of influence cannot reach the camera is not worth a
+    // slot, whatever its priority.
+    this.cullMargin = 6;
+
+    this.stats = { pointActive: 0, spotActive: 0, requests: 0, flashes: 0 };
+
+    this._requests = [];
+    this._pointPool = [];
+    this._spotPool = [];
+    this._slotOwner = [];
+
+    this._sunDir = new THREE.Vector3(0.3, 0.9, 0.2);
+    this._tmpColor = new THREE.Color();
+    this._groundColor = new THREE.Color();
+    this._patchFrame = 0;
+    this._visit = (obj) => this._patchObject(obj);
   }
 
   async init() {
     const { scene } = this.game;
-    const sky = this.game.sky;
 
-    this.sun = new THREE.DirectionalLight(sky.sunColor.getHex(), 3.2);
-    this.sun.position.copy(sky.sunDirection).multiplyScalar(80);
-    this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(this.game.settings.shadowMapSize, this.game.settings.shadowMapSize);
-    const d = 60;
-    Object.assign(this.sun.shadow.camera, { left: -d, right: d, top: d, bottom: -d, near: 0.5, far: 260 });
-    this.sun.shadow.bias = -0.0004;
-    this.sun.shadow.normalBias = 0.02;
-    this.sun.shadow.camera.updateProjectionMatrix();
-    scene.add(this.sun, this.sun.target);
+    this.csm = new CascadedShadows(this.game, { shadowDistance: this.settings.shadowDistance ?? 108 });
+    await this.csm.init();
+    this.sun = this.csm.sun;
 
-    this.hemi = new THREE.HemisphereLight(0x9fc0e8, 0x3b3630, 0.7);
+    // Hemisphere rather than ambient: an untinted flat ambient is the single most
+    // recognisable tell in a hobby scene, because it makes every shadow neutral
+    // grey. Sky above, bounced ground below, and the shadow side picks up the
+    // difference for free.
+    this.hemi = new THREE.HemisphereLight(0x9fc0e8, 0x40382f, 0.6);
+    this.hemi.name = 'sky-fill';
     scene.add(this.hemi);
+
+    for (let i = 0; i < this.maxPointLights; i++) {
+      // decay 2 is inverse-square, the only decay that reads as real; `distance`
+      // is the cutoff radius Three uses to window it.
+      const l = new THREE.PointLight(0xffffff, 0, 10, 2);
+      l.name = `local-point-${i}`;
+      l.castShadow = false;
+      scene.add(l);
+      this._pointPool.push(l);
+      this._slotOwner.push(null);
+    }
+    for (let i = 0; i < this.maxSpotLights; i++) {
+      const l = new THREE.SpotLight(0xffffff, 0, 18, 0.6, 0.45, 2);
+      l.name = `local-spot-${i}`;
+      l.castShadow = false;
+      scene.add(l, l.target);
+      this._spotPool.push(l);
+    }
+
+    // Request records and their handle lights all exist up front, so neither a
+    // firefight nor flash() ever allocates.
+    const spotRequests = Math.max(4, this.maxSpotLights * 3);
+    for (let i = 0; i < this.maxRequests; i++) {
+      const kind = i < this.maxRequests - spotRequests ? 1 : 2;
+      const light =
+        kind === 1
+          ? new THREE.PointLight(0xffffff, 0, 10, 2)
+          : new THREE.SpotLight(0xffffff, 0, 18, 0.6, 0.45, 2);
+      const rec = {
+        light,
+        kind,
+        active: false,
+        priority: 1,
+        life: 0,
+        maxLife: 0,
+        envelope: 1,
+        score: -Infinity,
+        slot: -1,
+      };
+      light.userData.lightSlot = rec;
+      this._requests.push(rec);
+    }
+
+    this._syncSky();
+    this._patchScene();
   }
 
-  addPointLight(pos, color = 0xffffff, intensity = 1, radius = 10) {
-    const l = new THREE.PointLight(color, intensity, radius, 2);
-    l.position.copy(pos);
-    this.game.scene.add(l);
+  /* ------------------------------------------------------------- public API */
+
+  /**
+   * Returns a real PointLight that is NOT in the scene: move it, recolour it,
+   * animate its intensity, and Lighting mirrors it into a resident GPU slot
+   * whenever it is one of the most important lights on screen.
+   */
+  addPointLight(pos, color = 0xffffff, intensity = 1, radius = 10, opts) {
+    const rec = this._claim(1);
+    if (!rec) return null;
+    const l = rec.light;
+    if (pos) l.position.copy(pos);
+    this._setColor(l.color, color);
+    l.intensity = intensity;
+    l.distance = radius;
+    rec.priority = opts?.priority ?? 1;
+    rec.maxLife = opts?.ms ? opts.ms / 1000 : 0;
+    rec.life = rec.maxLife;
+    rec.envelope = 1;
     return l;
   }
 
-  flash() {}
+  addSpotLight(pos, target, color = 0xffffff, intensity = 4, radius = 20, angle = 0.55, penumbra = 0.45, opts) {
+    const rec = this._claim(2);
+    if (!rec) return null;
+    const l = rec.light;
+    if (pos) l.position.copy(pos);
+    if (target) l.target.position.copy(target);
+    this._setColor(l.color, color);
+    l.intensity = intensity;
+    l.distance = radius;
+    l.angle = angle;
+    l.penumbra = penumbra;
+    rec.priority = opts?.priority ?? 2;
+    rec.maxLife = opts?.ms ? opts.ms / 1000 : 0;
+    rec.life = rec.maxLife;
+    rec.envelope = 1;
+    return l;
+  }
 
-  update() {
-    // Keep the shadow frustum centred ahead of the player.
-    if (!this.sun) return;
-    const cam = this.game.camera;
-    this.sun.target.position.copy(cam.position);
-    this.sun.position.copy(cam.position).addScaledVector(this.game.sky.sunDirection, 90);
+  /**
+   * Muzzle flashes and explosions. Allocation-free, and it binds a resident slot
+   * immediately rather than waiting for the next update, because a flash raised
+   * during the weapon's update has to light the world in the frame that drew the
+   * shot — one frame late reads as a lighting bug.
+   */
+  flash(pos, color = 0xffe2b0, intensity = 30, ms = 60) {
+    const rec = this._claim(1, true);
+    if (!rec) return null;
+    const l = rec.light;
+    l.position.copy(pos);
+    this._setColor(l.color, color);
+    l.intensity = intensity;
+    l.distance = Math.max(4, Math.sqrt(intensity) * 2.6);
+    rec.priority = 20; // outbids anything static
+    rec.maxLife = Math.max(0.008, ms / 1000);
+    rec.life = rec.maxLife;
+    rec.envelope = 1;
+    this.stats.flashes++;
+
+    const slot = this._weakestSlot(rec);
+    if (slot >= 0) this._bindPoint(slot, rec);
+    return l;
+  }
+
+  release(light) {
+    const rec = light?.userData?.lightSlot;
+    if (!rec || !rec.active) return;
+    rec.active = false;
+    rec.life = 0;
+    if (rec.kind === 1 && rec.slot >= 0) {
+      this._pointPool[rec.slot].intensity = 0;
+      this._slotOwner[rec.slot] = null;
+    }
+    if (rec.kind === 2 && rec.slot >= 0) this._spotPool[rec.slot].intensity = 0;
+    rec.slot = -1;
+  }
+
+  setShadowDistance(m) {
+    this.csm?.setShadowDistance(m);
+  }
+
+  debugCascades(on = true) {
+    this.csm?.setDebug(on);
+  }
+
+  /* ------------------------------------------------------------------ update */
+
+  update(dt) {
+    const clamped = Math.min(dt || 0, 0.1);
+    this._syncSky();
+    this.csm?.update(this.game.camera, this._sunDir);
+    this._updateLocals(clamped);
+
+    // Materials arrive after this system boots (the level, props, enemies and
+    // decals are all later in the order), so keep sweeping for unpatched ones.
+    // Cheap enough at a quarter of a second apart that it never shows up.
+    if (++this._patchFrame % 15 === 0) this._patchScene();
+  }
+
+  /** Sun colour, intensity and the sky fill, re-read from game.sky every frame. */
+  _syncSky() {
+    const sky = this.game.sky;
+    if (sky?.sunDirection) this._sunDir.copy(sky.sunDirection);
+    if (this._sunDir.lengthSq() < 1e-6) this._sunDir.set(0.3, 0.9, 0.2);
+    this._sunDir.normalize();
+
+    const elev = THREE.MathUtils.clamp(this._sunDir.y, -0.2, 1);
+    // Below the horizon the sun is off; the ramp above it is the atmospheric
+    // extinction that makes a low sun dim as well as orange.
+    const daylight = THREE.MathUtils.smoothstep(elev, -0.02, 0.28);
+    const sunI = (sky?.sunIntensity ?? 3.4 * daylight) * this.sunIntensityScale;
+
+    const lights = this.csm?.lights;
+    if (lights) {
+      for (let i = 0; i < lights.length; i++) {
+        if (sky?.sunColor) lights[i].color.copy(sky.sunColor);
+        // Only cascade 0 carries radiance; the rest are shadow-map carriers.
+        lights[i].intensity = i === 0 ? sunI : 0;
+      }
+    }
+
+    if (this.hemi) {
+      const amb = sky?.ambientColor;
+      if (amb) {
+        this.hemi.color.copy(sky.skyColor ?? amb);
+        // Ground bounce is the sky colour dragged toward warm dirt and darkened;
+        // this is what keeps the underside of geometry from going flat grey.
+        this._groundColor.copy(amb).lerp(this._tmpColor.setRGB(0.16, 0.12, 0.09), 0.72);
+        this.hemi.groundColor.copy(this._groundColor);
+      }
+      const base = sky?.ambientIntensity ?? 0.35 + 0.5 * daylight;
+      const ibl = this.game.scene.environment ? this.iblFillFactor : 1;
+      this.hemi.intensity = base * ibl * this.fillScale;
+    }
+  }
+
+  _updateLocals(dt) {
+    const camPos = this.game.camera.position;
+    const reqs = this._requests;
+    let active = 0;
+
+    for (let i = 0; i < reqs.length; i++) {
+      const rec = reqs[i];
+      if (!rec.active) continue;
+
+      if (rec.maxLife > 0) {
+        rec.life -= dt;
+        if (rec.life <= 0) {
+          this.release(rec.light);
+          continue;
+        }
+        // Quadratic falloff: a muzzle flash is mostly over in the first third of
+        // its life, and a linear ramp reads as a fading lamp instead of a bang.
+        const t = rec.life / rec.maxLife;
+        rec.envelope = t * t;
+      } else {
+        rec.envelope = 1;
+      }
+
+      // A light the player cannot see the effect of scores itself out of the pool
+      // rather than being deleted, so walking back into range re-lights it.
+      const reach = rec.light.distance + this.cullMargin;
+      const d2 = camPos.distanceToSquared(rec.light.position);
+      rec.score =
+        d2 > reach * reach
+          ? -Infinity
+          : rec.priority * 1000 + rec.light.intensity * rec.envelope * 4 - Math.sqrt(d2) * 6;
+
+      // Slots are mirrors, not owners; a caller that parents its handle would get
+      // lit twice and change the light count, which recompiles the world.
+      if (rec.light.parent) rec.light.removeFromParent();
+      active++;
+    }
+    this.stats.requests = active;
+
+    this.stats.pointActive = this._fillPool(1, this._pointPool);
+    this.stats.spotActive = this._fillPool(2, this._spotPool);
+  }
+
+  /** Highest-scoring requests win the resident slots. O(slots x requests), no allocation. */
+  _fillPool(kind, pool) {
+    const reqs = this._requests;
+    for (let i = 0; i < reqs.length; i++) if (reqs[i].kind === kind) reqs[i].slot = -1;
+
+    let filled = 0;
+    for (let s = 0; s < pool.length; s++) {
+      let best = null;
+      let bestScore = -Infinity;
+      for (let i = 0; i < reqs.length; i++) {
+        const rec = reqs[i];
+        if (!rec.active || rec.kind !== kind || rec.slot >= 0) continue;
+        if (rec.score > bestScore) {
+          bestScore = rec.score;
+          best = rec;
+        }
+      }
+      if (!best || bestScore === -Infinity) {
+        pool[s].intensity = 0;
+        if (kind === 1) this._slotOwner[s] = null;
+        continue;
+      }
+      best.slot = s;
+      if (kind === 1) this._bindPoint(s, best);
+      else this._bindSpot(s, best);
+      filled++;
+    }
+    return filled;
+  }
+
+  _bindPoint(slot, rec) {
+    const l = this._pointPool[slot];
+    const h = rec.light;
+    l.position.copy(h.position);
+    l.color.copy(h.color);
+    l.distance = h.distance;
+    l.decay = h.decay;
+    l.intensity = h.intensity * rec.envelope;
+    rec.slot = slot;
+    this._slotOwner[slot] = rec;
+  }
+
+  _bindSpot(slot, rec) {
+    const l = this._spotPool[slot];
+    const h = rec.light;
+    l.position.copy(h.position);
+    l.target.position.copy(h.target.position);
+    l.color.copy(h.color);
+    l.distance = h.distance;
+    l.angle = h.angle;
+    l.penumbra = h.penumbra;
+    l.decay = h.decay;
+    l.intensity = h.intensity * rec.envelope;
+  }
+
+  /** The slot whose current occupant is easiest to evict for `rec`. */
+  _weakestSlot(rec) {
+    let worst = -1;
+    let worstScore = Infinity;
+    for (let s = 0; s < this._pointPool.length; s++) {
+      const owner = this._slotOwner[s];
+      const score = owner && owner.active && owner !== rec ? owner.priority * 1000 : -Infinity;
+      if (score < worstScore) {
+        worstScore = score;
+        worst = s;
+      }
+    }
+    return worst;
+  }
+
+  _claim(kind, evict = false) {
+    const reqs = this._requests;
+    for (let i = 0; i < reqs.length; i++) {
+      const rec = reqs[i];
+      if (rec.active || rec.kind !== kind) continue;
+      rec.active = true;
+      rec.slot = -1;
+      rec.score = -Infinity;
+      return rec;
+    }
+
+    if (!evict) return null;
+    // Every record is taken: steal the least important one so a muzzle flash is
+    // never silently dropped.
+    let victim = null;
+    for (let i = 0; i < reqs.length; i++) {
+      const rec = reqs[i];
+      if (rec.kind !== kind) continue;
+      if (!victim || rec.priority < victim.priority) victim = rec;
+    }
+    if (!victim) return null;
+    this.release(victim.light);
+    victim.active = true;
+    victim.slot = -1;
+    return victim;
+  }
+
+  _setColor(target, color) {
+    if (typeof color === 'number') target.setHex(color);
+    else if (color) target.copy(color);
+    else target.setRGB(1, 1, 1);
+  }
+
+  /* -------------------------------------------------- material / caster sweep */
+
+  _patchScene() {
+    this.game.scene.traverse(this._visit);
+  }
+
+  _patchObject(obj) {
+    if (!obj.isMesh && !obj.isSkinnedMesh && !obj.isInstancedMesh) return;
+    const mat = obj.material;
+    let patched = false;
+    if (Array.isArray(mat)) {
+      for (let i = 0; i < mat.length; i++) patched = this.csm.patchMaterial(mat[i]) || patched;
+    } else {
+      patched = this.csm.patchMaterial(mat);
+    }
+    if (obj.userData.csmMesh) return;
+    obj.userData.csmMesh = true;
+
+    // A prop that does not receive shadows and does not cast one reads as pasted
+    // onto the frame, which is the review's hard fail, so opt-in is the wrong
+    // default here — every lit mesh participates unless it says otherwise.
+    const lit = patched || mat?.userData?.csm || (Array.isArray(mat) ? mat.some((m) => m.userData.csm) : false);
+    if (!lit || obj.userData.noShadow) return;
+    obj.receiveShadow = true;
+    if (obj.castShadow || obj.userData.noShadowCast) return;
+
+    // Ground planes and sky shells are the two things that must not be forced on:
+    // a 160 m quad fills every cascade with a depth value that occludes nothing,
+    // and a lit sky shell would shadow the entire world.
+    const geo = obj.geometry;
+    if (!geo) return;
+    if (!geo.boundingSphere) geo.computeBoundingSphere();
+    const r = geo.boundingSphere?.radius ?? 0;
+    const scale = Math.max(obj.scale.x, obj.scale.y, obj.scale.z);
+    if (r * scale < 45) obj.castShadow = true;
+  }
+
+  dispose() {
+    this.csm?.dispose();
+    this.hemi?.removeFromParent();
+    for (const l of this._pointPool) l.removeFromParent();
+    for (const l of this._spotPool) {
+      l.removeFromParent();
+      l.target.removeFromParent();
+    }
   }
 }

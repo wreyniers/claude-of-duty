@@ -243,18 +243,27 @@ export const MATERIAL_RECIPES = {
       const peel = b.warp(b.fbm({ freq: 6, octaves: 4, seed: 909 }), { freq: 13, amount: b.size * 0.022 });
       const cracks = b.ridge({ freq: 4, octaves: 5, seed: 17 });
       const paint = lin(0xb6b9ae);
-      const under = lin(0x8e8677);
+      // Only 20 levels below the paint, not 40. Lime plaster under limewash is
+      // barely darker than the wash — what actually distinguishes them is sheen.
+      // A 40-level step at a 16 cm blob scale, thresholded near-binary, is a
+      // two-tone pattern, and a two-tone pattern at that size on a wall reads as
+      // camouflage: it was the loudest thing in the interior frame and it made
+      // every facade in the establishing shot look mottled.
+      const under = lin(0xa39a89);
       b.normalStrength = 0.55;
       b.aoRelief = 0.4;
       b.each((i) => {
         // Peeling is a hard-edged event: the paint film either is there or is
-        // not, so the mask has a tight transition and the roughness jumps across
-        // it. A soft blend here is what makes procedural paint look like a decal.
-        const bare = smoothstep(0.6, 0.66, peel[i] + (trowel[i] - 0.5) * 0.18);
+        // not, so the mask keeps its tight transition and the roughness jumps
+        // across it — a soft blend there is what makes procedural paint look like
+        // a decal. The threshold is high, though: bare patches are a minority of
+        // a painted wall, and at a third of the surface they stop being damage and
+        // become the pattern.
+        const bare = smoothstep(0.7, 0.755, peel[i] + (trowel[i] - 0.5) * 0.18);
         const crack = smoothstep(0.55, 0.85, cracks[i]);
         b.height[i] = 0.58 + (trowel[i] - 0.5) * 0.14 + (stipple[i] - 0.5) * 0.05 - bare * 0.06 - crack * 0.3;
         let c = mixc(paint, under, bare);
-        c = mixc(c, lin(0x6d675c), crack * 0.7);
+        c = mixc(c, lin(0x77705f), crack * 0.6);
         b.rgb(i, ...c);
         b.scale(i, 0.94 + trowel[i] * 0.12);
         b.rough[i] = rgh((1 - bare) * (0.36 + stipple[i] * 0.1) + bare * 0.9 + crack * 0.2);

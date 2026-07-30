@@ -2,6 +2,13 @@ import * as THREE from 'three';
 import { CascadedShadows } from './CascadedShadows.js';
 
 /**
+ * Reflectance of the sand, paving and lime plaster this level is built out of.
+ * The first bounce is sky and sun light filtered through it, so it is the spectrum
+ * the hemisphere fill is tinted with rather than a hand-picked warm colour.
+ */
+const BOUNCE_ALBEDO = new THREE.Color(1.0, 0.8, 0.58);
+
+/**
  * Sun, cascaded shadow maps, and the local light budget.
  *
  * CONTRACT:
@@ -13,7 +20,7 @@ import { CascadedShadows } from './CascadedShadows.js';
  *   addSpotLight(pos, target, color, intensity, radius, angle, penumbra) -> light
  *   release(light)                     hand a slot back early
  *   csm                                the CascadedShadows instance
- *   sun / hemi                         the sun light and the sky/ground fill
+ *   sun / hemi                         the sun light and the ambient fill
  *   sunIntensityScale / fillScale      artistic trims, applied every frame
  *   setShadowDistance(m) / debugCascades(bool)
  *   stats                              { pointActive, spotActive, requests, flashes }
@@ -42,9 +49,10 @@ export class Lighting {
 
     this.sunIntensityScale = 1;
     this.fillScale = 1;
-    // Hemisphere fill would double-count the sky if Sky also supplies an env map,
-    // so it steps back when one is present.
-    this.iblFillFactor = 0.45;
+    // Weight of the hemisphere light once an env map is present. It is no longer a
+    // fraction of the sky fill but the strength of the bounce term the hemisphere
+    // takes over — see _syncSky.
+    this.iblFillFactor = 0.6;
 
     const soft = game.forge?.softwareGL === true;
     this.maxPointLights = soft ? 4 : 8;
@@ -64,6 +72,7 @@ export class Lighting {
     this._sunDir = new THREE.Vector3(0.3, 0.9, 0.2);
     this._tmpColor = new THREE.Color();
     this._groundColor = new THREE.Color();
+    this._bounce = new THREE.Color();
     this._patchFrame = 0;
     this._visit = (obj) => this._patchObject(obj);
   }
@@ -77,8 +86,8 @@ export class Lighting {
 
     // Hemisphere rather than ambient: an untinted flat ambient is the single most
     // recognisable tell in a hobby scene, because it makes every shadow neutral
-    // grey. Sky above, bounced ground below, and the shadow side picks up the
-    // difference for free.
+    // grey. What each half carries depends on whether Sky got an env map built —
+    // see _syncSky.
     this.hemi = new THREE.HemisphereLight(0x9fc0e8, 0x40382f, 0.6);
     this.hemi.name = 'sky-fill';
     scene.add(this.hemi);
@@ -240,7 +249,10 @@ export class Lighting {
     // Below the horizon the sun is off; the ramp above it is the atmospheric
     // extinction that makes a low sun dim as well as orange.
     const daylight = THREE.MathUtils.smoothstep(elev, -0.02, 0.28);
-    const sunI = (sky?.sunIntensity ?? 3.4 * daylight) * this.sunIntensityScale;
+    // sunIrradiance is Sky's own derived figure and the one the aerial term and
+    // the cloud radiance are already keyed off; deriving a second one here is how
+    // the key light and the sky drift apart on a preset change.
+    const sunI = (sky?.sunIrradiance ?? 3.4 * daylight) * this.sunIntensityScale;
 
     const lights = this.csm?.lights;
     if (lights) {
@@ -252,17 +264,46 @@ export class Lighting {
     }
 
     if (this.hemi) {
+      const base = sky?.ambientIntensity ?? 0.35 + 0.5 * daylight;
+      const horizon = sky?.horizonColor;
       const amb = sky?.ambientColor;
-      if (amb) {
-        this.hemi.color.copy(sky.skyColor ?? amb);
-        // Ground bounce is the sky colour dragged toward warm dirt and darkened;
-        // this is what keeps the underside of geometry from going flat grey.
+
+      if (this.game.scene.environment && horizon) {
+        // With an env map the sky's full irradiance already reaches every surface,
+        // and Materials pushes it further with envMapIntensity 1.25-1.5 — so a
+        // hemisphere tinted with the sky average is a second copy of the bluest
+        // term in the frame. Measured on flat ground at 17 degrees: sun plus env
+        // alone lands warm at blue/red 0.88-0.98, and adding a sky-tinted
+        // hemisphere on top flipped it to 1.05-1.10, which is why warm-lit paving
+        // read colder than the light falling on it.
+        //
+        // The term this renderer has no source for at all is the first bounce: a
+        // sunlit square throws light back up off the paving and sideways off the
+        // plaster, and that light is warm. So the hemisphere carries the bounce
+        // instead of the sky — the horizon band, which is both the brightest part
+        // of a golden-hour dome and the part the geometry actually faces, filtered
+        // through the level's own sand-and-plaster albedo. The blue fill is not
+        // lost, it is just left to the env map, which measures it correctly; the
+        // shadow side still comes out tinted.
+        this._bounce.copy(horizon).multiply(BOUNCE_ALBEDO);
+        const mx = Math.max(this._bounce.r, this._bounce.g, this._bounce.b, 1e-5);
+        this._bounce.multiplyScalar(1 / mx);
+        this.hemi.color.copy(this._bounce);
+        // A downward-facing surface sees the sunlit ground itself rather than walls
+        // and sky, so it gets the same bounce warmer and about a stop down — which
+        // is still roughly three times what a sky-tinted ground half was giving it.
+        this._groundColor.copy(this._bounce).lerp(this._tmpColor.setRGB(0.42, 0.26, 0.145), 0.42);
+        this.hemi.groundColor.copy(this._groundColor);
+        this.hemi.intensity = base * this.iblFillFactor * this.fillScale;
+      } else if (amb) {
+        // No env map built: the hemisphere is the only fill in the scene, so it
+        // goes back to carrying the sky — blue above, warm dirt bounce below —
+        // rather than leaving shadows with no sky in them at all.
+        this.hemi.color.copy(amb);
         this._groundColor.copy(amb).lerp(this._tmpColor.setRGB(0.16, 0.12, 0.09), 0.72);
         this.hemi.groundColor.copy(this._groundColor);
+        this.hemi.intensity = base * this.fillScale;
       }
-      const base = sky?.ambientIntensity ?? 0.35 + 0.5 * daylight;
-      const ibl = this.game.scene.environment ? this.iblFillFactor : 1;
-      this.hemi.intensity = base * ibl * this.fillScale;
     }
   }
 

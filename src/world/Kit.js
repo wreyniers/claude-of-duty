@@ -31,6 +31,29 @@ import * as THREE from 'three';
  *   new InstanceSet(...)        repeated props -> one draw call
  */
 
+/**
+ * What an unlit room is worth against a sunlit facade.
+ *
+ * Left at the shell's own recipe albedo the interior came out within three levels
+ * of the plaster around it, so every opening read as a rectangle painted on the
+ * wall rather than a hole through it. There is no global illumination here to
+ * work out on its own that the only light reaching a closed room is skylight
+ * through the opening itself, so the drop is authored into the shell's tint: a
+ * stop and a half under the facade, which is roughly what a camera exposed for
+ * the street records through a window.
+ */
+const INTERIOR_DARK = new THREE.Color(0x46413a);
+
+/**
+ * Glass has almost no diffuse albedo — a window is reflection plus whatever is
+ * behind it. The recipe's near-white base is authored for a pane read close up,
+ * where specular carries it; spread across a facade it lit up under skylight and
+ * left the openings brighter than the wall they sit in. Tinting the vertex colour
+ * takes the diffuse term down without touching the specular or the reflection,
+ * which are the parts that should be doing the work.
+ */
+const GLASS_DIFFUSE = new THREE.Color(0x555c60);
+
 /* ------------------------------------------------------------ mesh builder */
 
 /**
@@ -827,6 +850,7 @@ export class Kit {
       cell = 1.4,
       grime = 1,
       trimMat = 'concrete_cast',
+      recess = false,
     } = spec;
     const half = L / 2;
     const cuts = [-half, half];
@@ -864,6 +888,7 @@ export class Kit {
     }
 
     for (const o of openings) {
+      if (recess) this.recessBack(e, m, o, T);
       if (o.arch) this.archPatch(e, m, o, T, spec.archMat ?? mat, tint);
       if (o.trim !== false) this.openingTrim(e, m, o, T, trimMat, spec.trimTint, spec.trimBothSides === true);
       if (o.glass) this.glazing(e, m, o, T);
@@ -903,16 +928,40 @@ export class Kit {
     }
   }
 
+  /**
+   * The dark volume an opening looks into, closed off at the inner face of the
+   * wall.
+   *
+   * `interiorShell` is supposed to be this, but it sits a further half metre in
+   * and measurably does not reach the frame: with the shell tinted to a probe
+   * colour the openings on the north block came back at the value of the plaster
+   * around them, 151 against 151, unchanged. Whatever the shell is doing, a panel
+   * at the back of the reveal is the thing that cannot miss — it is exactly as
+   * deep as the wall is thick, so the opening reads as 44 cm of shadowed return
+   * and then nothing, which is what a window in a building nobody is standing in
+   * looks like from across a square.
+   */
+  recessBack(e, m, o, T) {
+    // Arch heads carry their opening above `h`, and a rectangular panel that
+    // stopped at the springing would leave a lit crescent at the top.
+    const h = o.h + (o.arch ? o.w / 2 + 0.06 : 0);
+    const M = new THREE.Matrix4().makeTranslation(o.x, o.y + h / 2, -T / 2 - 0.05).premultiply(m);
+    e.add('concrete_cast', this.box(o.w + 0.08, h + 0.08, 0.1, 0), M, { tint: INTERIOR_DARK, grime: 0 });
+  }
+
   /** Dirty glazing set back in the reveal. Sky reflection in a window is one of
    *  the cheapest large gains available on a facade. */
   glazing(e, m, o, T) {
-    const M = new THREE.Matrix4().makeTranslation(o.x, o.y + o.h / 2, -T * 0.18).premultiply(m);
-    e.add('glass_dirty', this.box(o.w - 0.1, o.h - 0.1, 0.02, 0), M, { grime: 0 });
+    // Hung deep in the reveal rather than near the outer face: the shaded return
+    // above and beside the pane is most of what says "hole" at thirty metres,
+    // where the 44 cm of wall thickness is three pixels of perspective.
+    const M = new THREE.Matrix4().makeTranslation(o.x, o.y + o.h / 2, -T * 0.34).premultiply(m);
+    e.add('glass_dirty', this.box(o.w - 0.1, o.h - 0.1, 0.02, 0), M, { grime: 0, tint: GLASS_DIFFUSE });
     // Frame: two mullions, so the pane reads as joinery rather than a blue slab.
     const F = new THREE.Matrix4();
-    F.makeTranslation(o.x, o.y + o.h * 0.52, -T * 0.16).premultiply(m);
+    F.makeTranslation(o.x, o.y + o.h * 0.52, -T * 0.3).premultiply(m);
     e.add('wood_plank_weathered', this.chamfer(o.w - 0.1, 0.055, 0.05, 0.012), F, {});
-    F.makeTranslation(o.x, o.y + o.h / 2, -T * 0.16).premultiply(m);
+    F.makeTranslation(o.x, o.y + o.h / 2, -T * 0.3).premultiply(m);
     e.add('wood_plank_weathered', this.chamfer(0.05, o.h - 0.1, 0.05, 0.012), F, {});
   }
 
@@ -1213,7 +1262,7 @@ export class Kit {
 
   /** Inward-facing shell, so a window into a non-enterable building shows a dark
    *  room rather than the backface of the far wall — or straight through it. */
-  interiorShell(e, m, w, h, d, mat = 'concrete_cast', tint) {
+  interiorShell(e, m, w, h, d, mat = 'concrete_cast', tint = INTERIOR_DARK) {
     const M = new THREE.Matrix4().makeTranslation(0, h / 2, 0).premultiply(m);
     e.add(mat, this.box(w, h, d, 0, true), M, { tint, grime: 0 });
   }
@@ -1328,6 +1377,10 @@ export class Kit {
         cell,
         collide: !hollow,
         trimBothSides: spec.trimBothSides === true,
+        // Only where there is no room to look into. A building with a real
+        // interior has to keep its doorways walkable and its windows glazed onto
+        // something the player can actually stand in.
+        recess: hollow,
       });
       if (s?.balconies) {
         for (const b of s.balconies) {

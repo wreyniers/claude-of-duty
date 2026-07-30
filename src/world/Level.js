@@ -55,9 +55,27 @@ import { Props } from './Props.js';
  * plaster read as camouflage and concrete as swiss cheese. These multipliers put
  * every recipe's own feature size where the real thing is: brick at 22 cm,
  * chippings at 5 cm, corrugation pitch at 7 cm, jute weave at 1 cm.
+ *
+ * Cast concrete is the exception and goes the other way, because the features its
+ * recipe authors are *architectural*, not granular: form-board seams and bug
+ * holes are decimetres to metres apart, and the recipe is written against its
+ * `tile` taken literally — its own comments budget roughly a metre of paving per
+ * 85 texels. Pulled to the same ~0.8 m tile as everything else, all of that lands
+ * under a pixel: the maps bake at 256 px, so 0.8 m per tile is 300 texels of fBm
+ * per metre, and the square's paving — the largest surface in any frame — came out
+ * as one texel of static per screen pixel at four metres. At 1.0 the aggregate
+ * lands at 66 mm and the shuttering seams at 2.5 m, which is a readable pit and a
+ * slab joint rather than noise.
+ *
+ * `concrete_pitted` stays dense even though its recipe shares those numbers.
+ * Loosening it to 1.4 was tried and reverted on the evidence: its spall craters
+ * and crack network are a *cellular* field, and at 1.4 m per tile the network
+ * became legible as a network — the terrace's retaining wall read as crazy paving,
+ * which is the failure its own recipe comment is written to avoid. Dense enough to
+ * stay sub-feature is the lesser evil for that one.
  */
 const TILE_MULT = {
-  concrete_cast: 3.0,
+  concrete_cast: 1.0,
   concrete_pitted: 3.2,
   brick_red: 2.6,
   plaster_painted: 3.2,

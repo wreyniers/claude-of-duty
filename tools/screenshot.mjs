@@ -95,6 +95,36 @@ async function waitForServer(url, timeoutMs = 60000) {
   throw new Error(`server never came up at ${url}`);
 }
 
+/**
+ * Place the shot. The player has to be moved as well as the camera: Player owns
+ * the camera every frame, so setting the camera alone is undone on the next one.
+ */
+function applyPose(page, pose) {
+  return page.evaluate(
+    ([x, y, z, yaw, pitch]) => {
+      const g = window.GAME;
+      const p = g.player;
+      if (p) {
+        p.position.set(x, y - p.eyeHeight, z);
+        p.velocity.set(0, 0, 0);
+        p.yaw = yaw;
+        p.pitch = pitch;
+        // Player smooths its own eye height and springs, and interpolates
+        // between sim ticks; without collapsing those the first frames after a
+        // teleport are captured mid-transit from the previous pose.
+        p._camEye = p.eyeHeight;
+        p._prevPos?.copy(p.position);
+        p._landDip = p._landDipVel = 0;
+        p._punch?.set(0, 0, 0);
+        p._punchVel?.set(0, 0, 0);
+      }
+      g.camera.position.set(x, y, z);
+      g.camera.rotation.set(pitch, yaw, 0, 'YXZ');
+    },
+    pose
+  );
+}
+
 async function main() {
   await mkdir(OUT, { recursive: true });
 
@@ -185,23 +215,22 @@ async function main() {
 
     const shots = ONLY.length ? SHOTS.filter((s) => ONLY.includes(s.name)) : SHOTS;
 
+    // Visit every pose before capturing any of them. Each pose brings its own
+    // materials into view for the first time, and under SwiftShader a cold
+    // shader compile can cost more than a whole capture budget — which made the
+    // first shot in the list absorb the cost for all of them and time out while
+    // the rest sailed through. Warming here spreads it outside the timed path.
+    const tWarm = Date.now();
+    for (const shot of shots) {
+      await applyPose(page, shot.pose);
+      await page.evaluate('window.__harness.settle(3)');
+    }
+    report.timings.prewarm = Date.now() - tWarm;
+    console.log(`[warm] prewarmed ${shots.length} poses in ${report.timings.prewarm}ms`);
+
     for (const shot of shots) {
       if (shot.setup) await page.evaluate(shot.setup);
-      await page.evaluate(
-        ([x, y, z, yaw, pitch]) => {
-          const g = window.GAME;
-          const p = g.player;
-          if (p) {
-            p.position.set(x, y - p.eyeHeight, z);
-            p.velocity.set(0, 0, 0);
-            p.yaw = yaw;
-            p.pitch = pitch;
-          }
-          g.camera.position.set(x, y, z);
-          g.camera.rotation.set(pitch, yaw, 0, 'YXZ');
-        },
-        shot.pose
-      );
+      await applyPose(page, shot.pose);
       await page.evaluate(`window.__harness.settle(${shot.settle ?? 12})`);
 
       const file = path.join(OUT, `${shot.name}.png`);

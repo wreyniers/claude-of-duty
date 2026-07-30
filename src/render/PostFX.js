@@ -886,10 +886,19 @@ export class PostFX {
         // visibility — 0.55 mid-floor against 0.45 in a corner — and a linear
         // mapping spends that as one flat dimming with no gradient in it. The
         // exponent pulls the two apart where it matters without moving open ground,
-        // whose visibility is already 1. 1.25 measured as a 20% fall into a wall's
-        // floor junction where the contact pass gets a factor of two on a crate, so
-        // the band needed more separation than that first value bought.
-        scale: 1.7,
+        // whose visibility is already 1.
+        //
+        // 1.25 measures as a 20% fall into a wall's floor junction, against a factor
+        // of two for the contact pass on a crate, and 1.7 was tried to close that
+        // gap. It does not pay: the frame it costs most is a market awning, whose
+        // underside is enclosed by posts, table and ground and therefore reads as
+        // deeply occluded, when physically most of what its hemisphere contains is
+        // sunlit ground *bouncing light up into it*. Occlusion applied to one
+        // composited radiance cannot tell an occluder from a source, so every stop
+        // taken there is taken from bounce that should be arriving — measured as the
+        // canopy's own texture variance collapsing from sd 10.5 to 3.2. The wide
+        // term's job is the gradient, not the depth; uWideFloor bounds the rest.
+        scale: 1.25,
         samples: software ? 9 : 12,
         screenSpaceRadius: false,
       });

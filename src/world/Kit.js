@@ -127,17 +127,26 @@ const FACE_DIRS = [
   [0, 0, -1],
 ];
 
-/** Axis-aligned box, centred, faces subdivided to roughly `cell` metres. */
+/**
+ * Axis-aligned box, centred, with its faces subdivided.
+ *
+ * `cell` is the VERTICAL cell size; horizontally the cells are 2.4x coarser.
+ * The subdivision only exists to carry per-vertex splash dirt and blast soot,
+ * and the splash gradient is a function of height alone — so spending triangles
+ * on horizontal resolution buys nothing, and a wall panel costs less than half
+ * what a square grid would.
+ */
 export function plainBox(w, h, d, cell = 0, invert = false) {
   const mb = new MB();
   const hx = w / 2;
   const hy = h / 2;
   const hz = d / 2;
-  const seg = (len) => (cell > 0 ? Math.max(1, Math.min(10, Math.round(len / cell))) : 1);
+  const segV = (len) => (cell > 0 ? Math.max(1, Math.min(8, Math.round(len / cell))) : 1);
+  const segH = (len) => (cell > 0 ? Math.max(1, Math.min(6, Math.round(len / (cell * 2.4)))) : 1);
   const s = invert ? -1 : 1;
-  for (const sx of [1, -1]) mb.grid(sx * hx, -hy, -hz, [0, 0, d], [0, h, 0], seg(d), seg(h), sx * s, 0, 0);
-  for (const sy of [1, -1]) mb.grid(-hx, sy * hy, -hz, [w, 0, 0], [0, 0, d], seg(w), seg(d), 0, sy * s, 0);
-  for (const sz of [1, -1]) mb.grid(-hx, -hy, sz * hz, [w, 0, 0], [0, h, 0], seg(w), seg(h), 0, 0, sz * s);
+  for (const sx of [1, -1]) mb.grid(sx * hx, -hy, -hz, [0, 0, d], [0, h, 0], segH(d), segV(h), sx * s, 0, 0);
+  for (const sy of [1, -1]) mb.grid(-hx, sy * hy, -hz, [w, 0, 0], [0, 0, d], segH(w), segH(d), 0, sy * s, 0);
+  for (const sz of [1, -1]) mb.grid(-hx, -hy, sz * hz, [w, 0, 0], [0, h, 0], segH(w), segV(h), 0, 0, sz * s);
   return mb.geometry();
 }
 
@@ -213,6 +222,94 @@ export function chamferBox(w, h, d, c = 0.03) {
         );
       }
     }
+  }
+  return mb.geometry();
+}
+
+/**
+ * Chamfered *bar*: the same lit-edge trick as `chamferBox`, but only on the four
+ * edges that run along the longest axis, with flat octagonal ends.
+ *
+ * This exists because trim is where the triangles go. Reveals, string courses,
+ * copings, kerbs, treads and mullions are all long thin bars, they accounted for
+ * 43% of this map's triangle budget as full chamfer boxes, and the eight corner
+ * facets they were paying for sit at the ends — which on a bar of trim are
+ * always butted into the next piece. 28 triangles instead of 44, for an edge
+ * highlight the eye cannot tell apart.
+ */
+export function chamferBar(w, h, d, c = 0.03) {
+  const half = [w / 2, h / 2, d / 2];
+  // Longest axis runs the length of the bar; the other two get chamfered.
+  let L = 0;
+  if (half[1] > half[L]) L = 1;
+  if (half[2] > half[L]) L = 2;
+  const a = (L + 1) % 3;
+  const b = (L + 2) % 3;
+  c = Math.max(0.003, Math.min(c, half[a] * 0.45, half[b] * 0.45));
+  const ins = [half[0], half[1], half[2]];
+  ins[a] -= c;
+  ins[b] -= c;
+  const mb = new MB();
+  const at = (sl, pa, pb) => {
+    const p = [0, 0, 0];
+    p[L] = sl * half[L];
+    p[a] = pa;
+    p[b] = pb;
+    return p;
+  };
+
+  for (const [axis, other] of [
+    [a, b],
+    [b, a],
+  ]) {
+    for (const s of [1, -1]) {
+      const n = [0, 0, 0];
+      n[axis] = s;
+      const q = [];
+      for (const sl of [-1, 1]) {
+        for (const so of [-1, 1]) {
+          const p = [0, 0, 0];
+          p[L] = sl * half[L];
+          p[axis] = s * half[axis];
+          p[other] = so * ins[other];
+          q.push(p);
+        }
+      }
+      mb.face([q[0], q[1], q[3], q[2]], n[0], n[1], n[2]);
+    }
+  }
+  const inv = Math.SQRT1_2;
+  for (const sa of [-1, 1]) {
+    for (const sb of [-1, 1]) {
+      const n = [0, 0, 0];
+      n[a] = sa * inv;
+      n[b] = sb * inv;
+      const q = [];
+      for (const sl of [-1, 1]) {
+        q.push(at(sl, sa * half[a], sb * ins[b]), at(sl, sa * ins[a], sb * half[b]));
+      }
+      mb.face([q[0], q[1], q[3], q[2]], n[0], n[1], n[2]);
+    }
+  }
+  // Octagonal end caps, in order around the section.
+  for (const sl of [1, -1]) {
+    const n = [0, 0, 0];
+    n[L] = sl;
+    mb.face(
+      [
+        at(sl, ins[a], -half[b]),
+        at(sl, half[a], -ins[b]),
+        at(sl, half[a], ins[b]),
+        at(sl, ins[a], half[b]),
+        at(sl, -ins[a], half[b]),
+        at(sl, -half[a], ins[b]),
+        at(sl, -half[a], -ins[b]),
+        at(sl, -ins[a], -half[b]),
+      ],
+      n[0],
+      n[1],
+      n[2]
+    );
   }
   return mb.geometry();
 }
@@ -619,6 +716,16 @@ export class InstanceSet {
   }
   build(matFor) {
     if (!this.items.length) return null;
+    // A white vertex colour so an instanced prop can share its material — and
+    // therefore its compiled program — with the merged batch that uses the same
+    // recipe. `vertexColors` with no colour attribute renders black, and a
+    // second program per material is minutes of shader compilation on the
+    // software rasteriser the capture harness runs on.
+    if (!this.geometry.attributes.color) {
+      const n = this.geometry.attributes.position.count;
+      const white = new Float32Array(n * 3).fill(1);
+      this.geometry.setAttribute('color', new THREE.BufferAttribute(white, 3));
+    }
     const mesh = new THREE.InstancedMesh(this.geometry, matFor(this.matKey), this.items.length);
     const c = new THREE.Color();
     for (let i = 0; i < this.items.length; i++) {
@@ -659,7 +766,20 @@ export class Kit {
     );
   }
 
+  /**
+   * Chamfered box, or a chamfered *bar* when the piece is long and thin. The
+   * dispatch is automatic so every call site gets the cheap version where the
+   * cheap version is indistinguishable — which is most of the trim on the map.
+   */
   chamfer(w, h, d, c = 0.03) {
+    const bar = Math.max(w, h, d) / Math.max(1e-4, Math.min(w, h, d)) > 2.6;
+    return this._shape(`${bar ? 'r' : 'c'}${w.toFixed(3)},${h.toFixed(3)},${d.toFixed(3)},${c.toFixed(3)}`, () =>
+      bar ? chamferBar(w, h, d, c) : chamferBox(w, h, d, c)
+    );
+  }
+
+  /** Full 12-edge chamfer, for the few places a bar's flat ends would show. */
+  chamferAll(w, h, d, c = 0.03) {
     return this._shape(`c${w.toFixed(3)},${h.toFixed(3)},${d.toFixed(3)},${c.toFixed(3)}`, () => chamferBox(w, h, d, c));
   }
 
@@ -776,7 +896,10 @@ export class Kit {
       // over an arch is the classic procedural giveaway.
       if (!o.arch) put(o.x, o.y + o.h + 0.09, w + jw * 2 + 0.12, 0.18, 0.15, dz * 1.05);
       put(o.x, o.y - 0.055, w + jw * 2 + 0.18, 0.11, 0.25, dz * 1.2);
-      for (const sx of [-1, 1]) put(o.x + sx * (w / 2 + jw / 2), o.y + o.h / 2, jw, o.h, 0.1, dz);
+      // Jambs only on the storeys a player can read them on. Above about seven
+      // metres a 13 cm reveal is under a pixel from anywhere in the map, and
+      // reveal trim is the vertex-heaviest thing on a facade by a wide margin.
+      if (o.y < 7) for (const sx of [-1, 1]) put(o.x + sx * (w / 2 + jw / 2), o.y + o.h / 2, jw, o.h, 0.1, dz);
     }
   }
 
@@ -1163,6 +1286,7 @@ export class Kit {
       cornice = true,
       stringCourse = false,
       pilasters = true,
+      topSlab = true,
       roof = {},
       hollow = false,
       cell = 1.4,
@@ -1217,7 +1341,9 @@ export class Kit {
       this.interiorShell(e, base, w - T * 2 - 0.05, Math.max(2.4, h - 0.4), d - T * 2 - 0.05, 'concrete_cast', spec.shellTint);
     } else {
       const floors = Math.max(1, Math.round(h / floorH));
-      for (let f = 0; f <= floors; f++) {
+      // topSlab false leaves the room open to the roof deck, so a collapsed roof
+      // is a hole to the sky rather than a hole above a ceiling.
+      for (let f = 0; f <= (topSlab ? floors : floors - 1); f++) {
         const y = Math.min(f * floorH, h - 0.2);
         const S = new THREE.Matrix4().makeTranslation(0, y + 0.08, 0).premultiply(base);
         e.add(spec.floorMat ?? 'concrete_cast', this.box(w - T * 2, 0.16, d - T * 2, 2.4), S, { tint: spec.floorTint });

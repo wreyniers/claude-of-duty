@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { Rng } from '../render/Noise.js';
-import { Kit, Batcher, InstanceSet } from './Kit.js';
+import { Kit, Batcher } from './Kit.js';
 import { Props } from './Props.js';
 
 /**
@@ -45,6 +45,39 @@ import { Props } from './Props.js';
  *   zones                     named rectangles for AI and audio reverb
  *   stats                     { initMs, meshes, triangles, colliders, instances }
  */
+
+/**
+ * Texture density, in tiles per the recipe's own `tile` metres.
+ *
+ * The recipes state a metres-per-tile figure, but they were authored to be
+ * sampled at 2-3 tiles per UV unit, and taking `tile` literally puts a brick
+ * course at half a metre and an asphalt chipping at 13 cm — which is what makes
+ * plaster read as camouflage and concrete as swiss cheese. These multipliers put
+ * every recipe's own feature size where the real thing is: brick at 22 cm,
+ * chippings at 5 cm, corrugation pitch at 7 cm, jute weave at 1 cm.
+ */
+const TILE_MULT = {
+  concrete_cast: 2.2,
+  concrete_pitted: 2.6,
+  brick_red: 2.2,
+  plaster_painted: 2.1,
+  tile_ceramic: 1.3,
+  asphalt: 2.6,
+  dirt_packed: 2.2,
+  gravel: 2.2,
+  sand: 2.0,
+  steel_brushed: 2.0,
+  steel_rusted: 2.2,
+  iron_painted_chipped: 2.2,
+  aluminium_scuffed: 2.0,
+  corrugated_metal: 3.4,
+  wood_plank_weathered: 2.6,
+  wood_ply: 2.2,
+  sandbag_canvas: 5.0,
+  camo_fabric: 3.0,
+  rubber: 3.5,
+  glass_dirty: 1.6,
+};
 
 /** Faded plaster and masonry hues. Every building gets its own so the town does
  *  not read as one paint batch. */
@@ -117,7 +150,7 @@ export class Level {
    * `recipe[|2s][|xN]`: two-sided, and a tiling multiplier for props whose
    * natural texel density differs from the recipe's metres-per-tile.
    */
-  _matFor(key, instanced = false) {
+  _matFor(key) {
     const forge = this.game.forge;
     const parts = String(key).split('|');
     const name = parts[0];
@@ -125,16 +158,18 @@ export class Level {
     let side = null;
     for (let i = 1; i < parts.length; i++) {
       if (parts[i] === '2s') side = THREE.DoubleSide;
+      // `|xN` overrides the density table for one prop, it does not scale it.
       else if (parts[i][0] === 'x') mult = parseFloat(parts[i].slice(1)) || 1;
     }
+    if (mult === 1) mult = TILE_MULT[name] ?? 1;
     const tile = forge.tileFor(name) || 1;
     // Geometry UVs are in metres, so repeat is 1/tile: one texture tile covers
     // exactly the metres its recipe was authored for, on every surface in the
     // level, whatever size the piece is.
-    const o = { uvScale: [mult / tile, mult / tile] };
-    // vertexColors with no colour attribute reads black, so instanced props —
-    // which tint through instanceColor instead — must not ask for it.
-    if (!instanced) o.vertexColors = true;
+    // vertexColors everywhere, including on instanced props (InstanceSet gives
+    // their geometry a white colour attribute): one material per recipe means one
+    // compiled program per recipe, and programs are the expensive thing.
+    const o = { uvScale: [mult / tile, mult / tile], vertexColors: true };
     if (side) o.side = side;
     return forge.material(name, o);
   }
@@ -179,14 +214,23 @@ export class Level {
     const k = this.kit;
     const rng = this.rng;
 
-    // Outskirts, big enough that its edge never enters a frame; the sky dome's
-    // below-horizon term takes over past the haze.
-    const dirt = new THREE.PlaneGeometry(560, 560, 6, 6).rotateX(-Math.PI / 2);
-    e.add('dirt_packed', dirt, new THREE.Matrix4().makeTranslation(0, -0.06, -40), {
-      mottle: 0.3,
-      mottleScale: 0.006,
-      grime: 0,
-    });
+    // Outskirts, as a frame around the paved square rather than one plane under
+    // it. A full-screen ground layer hidden behind another full-screen ground
+    // layer is a second pass of three samplers at grazing incidence for nothing,
+    // and grazing-angle ground is the most expensive fill in the frame.
+    for (const [x0, x1, z0, z1] of [
+      [-300, 300, -340, -16],
+      [-300, 300, 14, 260],
+      [-300, -20, -16, 14],
+      [20, 300, -16, 14],
+    ]) {
+      const g = new THREE.PlaneGeometry(x1 - x0, z1 - z0, 5, 5).rotateX(-Math.PI / 2);
+      e.add('dirt_packed', g, new THREE.Matrix4().makeTranslation((x0 + x1) / 2, -0.06, (z0 + z1) / 2), {
+        mottle: 0.3,
+        mottleScale: 0.006,
+        grime: 0,
+      });
+    }
 
     // The square's paving: one continuous grid so the large-scale albedo drift
     // interpolates smoothly instead of stepping at tile joins.
@@ -216,7 +260,7 @@ export class Level {
     // Patches where the paving has failed into dirt and gravel. Overlapping
     // rectangles at different rotations blend the two grounds instead of
     // butting them, which is what stops a material change reading as a decal.
-    for (let i = 0; i < 26; i++) {
+    for (let i = 0; i < 16; i++) {
       const a = rng.float() * Math.PI * 2;
       const r = 6 + rng.float() * 26;
       const x = Math.cos(a) * r;
@@ -297,6 +341,9 @@ export class Level {
       plinth: 0.5,
       stringCourse: false,
       trimBothSides: true,
+      // No ceiling slab: the collapsed roof corner has to be a hole to the sky,
+      // which is where the interior pose gets its second light source.
+      topSlab: false,
       floorMat: 'tile_ceramic',
       roof: { parapet: 0.66, collapsed: { x: -3.2, z: -3.6, w: 3.8, d: 3.6 } },
     });
@@ -324,7 +371,7 @@ export class Level {
     // Ceiling beams under the roof deck, and the collapsed corner's fallen ones.
     for (let i = 0; i < 8; i++) {
       const bz = -11 + i * 1.62;
-      const M = new THREE.Matrix4().makeTranslation(cx, 4.28, bz);
+      const M = new THREE.Matrix4().makeTranslation(cx, 4.47, bz);
       e.add('wood_plank_weathered', k.chamfer(w - T * 2, 0.22, 0.16, 0.02), M, { grime: 0 });
     }
     for (let i = 0; i < 3; i++) {
@@ -618,7 +665,7 @@ export class Level {
     });
     k.bandAround(e, 'concrete_cast', row, 3.5, 12, 0.45, 0.32, 0.13, new THREE.Color(HUE.bone));
     this.props.sign('north', new THREE.Matrix4().makeTranslation(-11.5, 3.0, -18.24), 2.6, 0.85, 0xa8482f);
-    this.props.marketStall('north', -6.2, -16.6, 0.1, 2.6, 1.7, 0xc4a054);
+    this.props.marketStall('north', -6.2, -16.6, 0.1, 2.6, 1.7, 0xe4b862);
     this.props.scatterDebris('north', -4, -17.5, 5, 2, 26);
   }
 
@@ -751,8 +798,8 @@ export class Level {
     });
     // Everything from here to the reset sits on the terrace deck, not the square.
     this.props.y = ty;
-    this.props.marketStall('east', 12.4, -3.6, -0.25, 2.7, 1.8, 0xb04a34);
-    this.props.marketStall('east', 12.8, 0.4, 0.15, 2.4, 1.7, 0xc9a251);
+    this.props.marketStall('east', 12.4, -3.6, -0.25, 2.7, 1.8, 0xd4603c);
+    this.props.marketStall('east', 12.8, 0.4, 0.15, 2.4, 1.7, 0xe8bc60);
     this.props.planter('east', 11.2, -6.6, 0.2, 1.4);
     this.props.planter('east', 11.4, -10.4, -0.3, 1.2);
     this.props.yardClutter('east', 16.8, -1.6, 0.2, 2.2, 6);
@@ -962,9 +1009,9 @@ export class Level {
     }
 
     /* --- market row along the square's north side ------------------------ */
-    this.props.marketStall('square', -3.4, 6.8, 3.0, 2.8, 1.8, 0xb84e33);
-    this.props.marketStall('square', 0.4, 7.4, 3.16, 2.5, 1.7, 0xc7a24e);
-    this.props.marketStall('square', -8.0, -13.4, 0.3, 2.7, 1.8, 0x9a7a4a);
+    this.props.marketStall('square', -3.4, 6.8, 3.0, 2.8, 1.8, 0xd8603c);
+    this.props.marketStall('square', 0.4, 7.4, 3.16, 2.5, 1.7, 0xe6bc5c);
+    this.props.marketStall('square', -8.0, -13.4, 0.3, 2.7, 1.8, 0xc09a58);
 
     /* --- fighting positions --------------------------------------------- */
     // The close material read pose looks straight at this cluster from 4 m, so
@@ -1119,7 +1166,7 @@ export class Level {
   _finish() {
     const meshes = this.batcher.build(
       this.root,
-      (key) => this._matFor(key, false),
+      (key) => this._matFor(key),
       (mesh, zone) => {
         mesh.receiveShadow = true;
         // The distant ring and the ground must not cast: the ring is beyond the
@@ -1134,7 +1181,7 @@ export class Level {
     this.meshes.push(...meshes);
 
     for (const set of this.props.instances) {
-      const mesh = set.build((key) => this._matFor(key, true));
+      const mesh = set.build((key) => this._matFor(key));
       if (!mesh) continue;
       mesh.receiveShadow = true;
       // Grass and brass cast nothing worth a shadow-map fetch; everything with

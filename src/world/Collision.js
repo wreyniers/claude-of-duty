@@ -85,8 +85,6 @@ export class Collision {
     for (let i = 0; i < 8; i++) {
       this._ring.push({ position: new THREE.Vector3(), grounded: false, normal: new THREE.Vector3(0, 1, 0), hit: false, object: null });
     }
-    this._vA = new THREE.Vector3();
-    this._vB = new THREE.Vector3();
   }
 
   async init() {
@@ -576,12 +574,17 @@ export class Collision {
     const dy = to.y - from.y;
     const dz = to.z - from.z;
     const len = Math.hypot(dx, dy, dz);
-    // No substep longer than 0.7 r: this, not the fixed timestep, is what makes
-    // tunnelling impossible at sprint speed or after a long frame hitch.
-    const steps = Math.max(1, Math.min(24, Math.ceil(len / (r * 0.7))));
-    const sx = dx / steps;
-    const sy = dy / steps;
-    const sz = dz / steps;
+    // No substep longer than 0.7 r: this, not the size of the fixed timestep, is
+    // what makes tunnelling impossible at sprint speed or after a frame hitch.
+    // A request longer than the substep budget can cover is clamped short rather
+    // than stretched, because a teleport through a wall is worse than falling
+    // behind by a frame.
+    const steps = Math.max(1, Math.min(96, Math.ceil(len / (r * 0.7))));
+    const reach = Math.min(len, steps * r * 0.7);
+    const k = len > 1e-9 ? reach / len / steps : 0;
+    const sx = dx * k;
+    const sy = dy * k;
+    const sz = dz * k;
 
     let bestNy = -2;
     let anyHit = false;

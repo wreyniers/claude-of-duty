@@ -73,15 +73,19 @@ export class Props {
 
   /* --------------------------------------------------------------- geometry */
 
-  /** Oil drum: rolled body, two swage rings, a rim and a bung. */
+  /**
+   * Oil drum: rolled body, two swage rings, two rims, a bung. The rings are
+   * short wide cylinders rather than tori — a torus at a readable smoothness is
+   * 240 triangles, and there are a hundred drums' worth of instances on this map.
+   */
   drumGeo() {
     const k = this.kit;
     return mergeLocal([
       [k.cylinder(0.29, 0.29, 0.86, 12), t(0, 0.43, 0)],
-      [k.torus(0.295, 0.028, 12, 5), rx(0, 0.62, 0)],
-      [k.torus(0.295, 0.028, 12, 5), rx(0, 0.26, 0)],
-      [k.torus(0.29, 0.035, 12, 5), rx(0, 0.85, 0)],
-      [k.torus(0.29, 0.035, 12, 5), rx(0, 0.02, 0)],
+      [k.cylinder(0.315, 0.315, 0.055, 12), t(0, 0.62, 0)],
+      [k.cylinder(0.315, 0.315, 0.055, 12), t(0, 0.26, 0)],
+      [k.cylinder(0.3, 0.3, 0.06, 12), t(0, 0.85, 0)],
+      [k.cylinder(0.3, 0.3, 0.06, 12), t(0, 0.02, 0)],
       [k.cylinder(0.05, 0.05, 0.04, 6), t(0.16, 0.87, 0)],
     ]);
   }
@@ -111,34 +115,34 @@ export class Props {
   bagGeo() {
     const k = this.kit;
     return mergeLocal([
-      [k.sphere(0.5, 9, 6), s3(0.62, 0.3, 0.42)],
-      [k.sphere(0.5, 6, 4), compose(0.3, 0.02, 0, 0.13, 0.1, 0.09)],
+      [k.sphere(0.5, 8, 5), s3(0.44, 0.22, 0.3)],
     ]);
   }
 
-  /** Rubble chunk. Sub-metre, angular, chamfered so its edges catch light. */
+  /**
+   * Rubble chunk and half-brick. Chamfered despite the triangle cost: an
+   * unchamfered lump lying on the ground presents nothing but faces pointing
+   * away from a low sun, and reads as a black paper cut-out.
+   */
   chunkGeo() {
-    return this.kit.chamfer(0.34, 0.2, 0.26, 0.035);
+    return this.kit.chamfer(0.26, 0.15, 0.2, 0.022);
   }
 
   brickGeo() {
-    return this.kit.chamfer(0.22, 0.07, 0.1, 0.008);
+    return this.kit.chamfer(0.21, 0.07, 0.1, 0.01);
   }
 
   tyreGeo() {
     return mergeLocal([
-      [this.kit.torus(0.3, 0.115, 14, 7), rx(0, 0, 0)],
-      [this.kit.cylinder(0.17, 0.17, 0.18, 10), rxq(0, 0, 0)],
+      [this.kit.torus(0.3, 0.115, 12, 5), rx(0, 0, 0)],
+      [this.kit.cylinder(0.17, 0.17, 0.18, 8), rxq(0, 0, 0)],
     ]);
   }
 
   /** Spent case: 1 cm of brass. Only ever seen at the player's feet, and that is
    *  exactly where the eye looks for evidence that a fight happened. */
   brassGeo() {
-    return mergeLocal([
-      [this.kit.cylinder(0.0045, 0.005, 0.039, 6), rxq(0, 0, 0)],
-      [this.kit.cylinder(0.0035, 0.0045, 0.012, 6), rxq(0, 0.024, 0)],
-    ]);
+    return mergeLocal([[this.kit.cylinder(0.0042, 0.005, 0.048, 5), rxq(0, 0, 0)]]);
   }
 
   /** Jerry can: flat body, three ribs, a spout and a handle. */
@@ -158,7 +162,7 @@ export class Props {
       [k.cylinder(0.16, 0.16, 0.52, 12), t(0, 0.26, 0)],
       [k.dome(0.16, Math.PI / 2, 12, 5), t(0, 0.52, 0)],
       [k.cylinder(0.055, 0.055, 0.09, 8), t(0, 0.6, 0)],
-      [k.torus(0.09, 0.014, 10, 4), rx(0, 0.63, 0)],
+      [k.cylinder(0.1, 0.1, 0.028, 8), t(0, 0.63, 0)],
     ]);
   }
 
@@ -168,7 +172,7 @@ export class Props {
     const k = this.kit;
     const parts = [[k.chamfer(0.78, 0.6, 0.4, 0.02), t(0, 0, 0)]];
     for (let i = 0; i < 5; i++) parts.push([k.chamfer(0.66, 0.04, 0.04, 0.008), t(0, -0.2 + i * 0.1, 0.2)]);
-    parts.push([k.torus(0.2, 0.022, 12, 4), compose(0, 0.02, 0.21, 1, 1, 1)]);
+    parts.push([k.torus(0.2, 0.022, 10, 4), compose(0, 0.02, 0.21, 1, 1, 1)]);
     parts.push([k.cylinder(0.06, 0.06, 0.06, 8), compose(0, 0.02, 0.2, 1, 1, 1, Math.PI / 2)]);
     for (const sx of [-1, 1]) parts.push([k.chamfer(0.06, 0.1, 0.5, 0.012), t(sx * 0.3, -0.34, -0.05)]);
     return mergeLocal(parts);
@@ -182,7 +186,11 @@ export class Props {
   dishGeo() {
     const k = this.kit;
     return mergeLocal([
-      [k.dome(0.42, Math.PI / 2, 14, 5), compose(0, 0.3, 0, 1, 0.42, 1, 1.15)],
+      [k.dome(0.42, Math.PI / 2, 12, 4), compose(0, 0.3, 0, 1, 0.42, 1, 1.15)],
+      // Mirrored inner skin. The negative x scale reverses the winding, so this
+      // copy faces into the bowl: a dish is seen from inside its own aperture as
+      // often as outside, and two-sided rendering costs a second program.
+      [k.dome(0.4, Math.PI / 2, 12, 4), compose(0, 0.3, 0, -1, 0.42, 1, 1.15)],
       [k.cylinder(0.018, 0.018, 0.36, 6), compose(0, 0.26, 0.1, 1, 1, 1, -0.55)],
       [k.cylinder(0.035, 0.045, 0.52, 8), t(0, 0.0, -0.02)],
       [k.chamfer(0.22, 0.05, 0.22, 0.01), t(0, -0.25, -0.02)],
@@ -200,19 +208,19 @@ export class Props {
   sandbagWall(zone, x, z, angle, length, courses = 3, y = 0) {
     const rng = this.rng;
     const set = this.set('sandbag', 'sandbag_canvas', () => this.bagGeo());
-    const bagW = 0.62;
-    const per = Math.max(2, Math.round(length / (bagW * 0.9)));
+    const bagW = 0.44;
+    const per = Math.max(2, Math.round(length / (bagW * 0.92)));
     const dx = Math.cos(angle);
     const dz = -Math.sin(angle);
     for (let c = 0; c < courses; c++) {
       const short = c === courses - 1 ? rng.int(3) : 0;
       const off = (c & 1) * 0.5;
       for (let i = 0; i < per - short; i++) {
-        const t2 = (i + off - (per - 1) / 2) * bagW * 0.88;
+        const t2 = (i + off - (per - 1) / 2) * bagW * 0.9;
         this.place(
           set,
-          x + dx * t2 + rng.range(-0.03, 0.03),
-          y + 0.14 + c * 0.26,
+          x + dx * t2 + rng.range(-0.025, 0.025),
+          y + 0.1 + c * 0.19,
           z + dz * t2 + rng.range(-0.03, 0.03),
           angle + rng.range(-0.13, 0.13),
           rng.range(0.94, 1.07),
@@ -223,8 +231,8 @@ export class Props {
     }
     const M = new THREE.Matrix4()
       .makeRotationY(angle)
-      .setPosition(x, this.y + y + (courses * 0.26) / 2, z);
-    this.bat.zone(zone).collide(length + 0.5, courses * 0.26, 0.66, M);
+      .setPosition(x, this.y + y + (courses * 0.19) / 2, z);
+    this.bat.zone(zone).collide(length + 0.4, courses * 0.19 + 0.06, 0.46, M);
   }
 
   /**
@@ -247,7 +255,7 @@ export class Props {
       }
     }
     M.makeTranslation(0, h, 0).premultiply(base);
-    e.add('camo_fabric|2s', saggingQuad(w + 0.5, d + 0.55, 0.22, 5, 3), M, {
+    e.add('camo_fabric', saggingQuad(w + 0.5, d + 0.55, 0.22, 5, 3), M, {
       tint: new THREE.Color(awningTint),
       grime: 0,
     });
@@ -256,13 +264,13 @@ export class Props {
     e.add('wood_plank_weathered', k.chamfer(w, 0.07, d * 0.72, 0.014), M, {});
     e.collide(w, 0.9, d * 0.72, M);
     M.makeTranslation(0, 0.43, d * 0.1 + d * 0.34).premultiply(base);
-    e.add('camo_fabric|2s', k.box(w, 0.86, 0.02, 0), M, { tint: new THREE.Color(awningTint).multiplyScalar(0.7) });
+    e.add('camo_fabric', k.box(w, 0.86, 0.02, 0), M, { tint: new THREE.Color(awningTint).multiplyScalar(0.7) });
     for (const sx of [-1, 1]) {
       M.makeTranslation(sx * (w / 2 - 0.12), 0.43, d * 0.1).premultiply(base);
       e.add('wood_plank_weathered', k.chamfer(0.08, 0.86, 0.08, 0.012), M, {});
     }
     // Produce: shallow crates on the counter, sacks under it.
-    const crate = this.set('crate_small', 'wood_ply|x3', () => this.crateGeo(0.38));
+    const crate = this.set('crate_small', 'wood_ply', () => this.crateGeo(0.38));
     for (let i = 0; i < 3; i++) {
       const lx = -w / 2 + 0.45 + i * (w / 3.2);
       this.P.set(lx, 0.9, d * 0.1 + rng.range(-0.15, 0.15)).applyMatrix4(base);
@@ -280,7 +288,7 @@ export class Props {
    * the glazing gone: a wreck reads by silhouette, so the shape gets the effort
    * and the material stays uniformly dark and rough.
    */
-  carHulk(zone, x, z, ry, tint = 0x2a2724) {
+  carHulk(zone, x, z, ry, tint = 0x4e483f) {
     const e = this.bat.zone(zone);
     const k = this.kit;
     const rng = this.rng;
@@ -399,7 +407,7 @@ export class Props {
   }
 
   dish(zone, x, y, z, ry) {
-    const set = this.set('dish', 'aluminium_scuffed|2s', () => this.dishGeo());
+    const set = this.set('dish', 'aluminium_scuffed', () => this.dishGeo());
     this.place(set, x, y, z, ry, this.rng.range(0.85, 1.2), [0xdad6cc, 0xc9c4b6, 0xb0aa9c]);
   }
 
@@ -477,12 +485,12 @@ export class Props {
       const M = new THREE.Matrix4()
         .makeRotationY(ry + rng.range(-0.15, 0.15))
         .setPosition(p.x, p.y - h / 2 - 0.02, p.z);
-      e.add('camo_fabric|2s', saggingQuad(w, 0.05, 0.02, 3, 1), M, { tint: new THREE.Color(rng.pick(CLOTH_TINTS)) });
+      e.add('camo_fabric', saggingQuad(w, 0.05, 0.02, 3, 1), M, { tint: new THREE.Color(rng.pick(CLOTH_TINTS)) });
       const D = new THREE.Matrix4()
         .makeRotationY(ry + rng.range(-0.15, 0.15))
         .multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2))
         .setPosition(p.x, p.y - h / 2 - 0.02, p.z);
-      e.add('camo_fabric|2s', saggingQuad(w, h, 0.06, 3, 3), D, { tint: new THREE.Color(rng.pick(CLOTH_TINTS)), grime: 0 });
+      e.add('camo_fabric', saggingQuad(w, h, 0.06, 3, 3), D, { tint: new THREE.Color(rng.pick(CLOTH_TINTS)), grime: 0 });
     }
   }
 
@@ -672,16 +680,18 @@ export class Props {
   scatterDebris(zone, x, z, rx, rz, count, opts = {}) {
     const rng = this.rng;
     const chunk = this.set('chunk', 'concrete_pitted', () => this.chunkGeo());
-    const brick = this.set('brick', 'brick_red|x2.5', () => this.brickGeo());
+    const brick = this.set('brick', 'brick_red', () => this.brickGeo());
     for (let i = 0; i < count; i++) {
       const bias = opts.bias ?? 0;
       const u = rng.float();
       const px = x + (u * 2 - 1) * rx;
       const pz = z + (rng.float() * 2 - 1) * rz * (1 - bias * Math.abs(u));
       const set = rng.float() < (opts.brickRatio ?? 0.45) ? brick : chunk;
-      this.place(set, px, (opts.y ?? 0) + 0.02, pz, rng.float() * 3, rng.range(0.45, 1.35), DEBRIS_TINTS, {
-        rx: rng.range(-0.5, 0.5),
-        rz: rng.range(-0.5, 0.5),
+      // Sunk 3 cm and tilted only slightly: debris that pivots on one corner
+      // floats, and nothing gives a scatter away faster.
+      this.place(set, px, (opts.y ?? 0) - 0.028, pz, rng.float() * 3, rng.range(0.5, 1.15), DEBRIS_TINTS, {
+        rx: rng.range(-0.2, 0.2),
+        rz: rng.range(-0.2, 0.2),
       });
     }
   }
@@ -703,9 +713,9 @@ export class Props {
   /** Drums, crates, pallets and cans against a wall or in a yard. */
   yardClutter(zone, x, z, ry, spread = 2.4, n = 7) {
     const rng = this.rng;
-    const drum = this.set('drum', 'steel_rusted|x1.6', () => this.drumGeo());
-    const crate = this.set('crate', 'wood_plank_weathered|x2.4', () => this.crateGeo(0.62));
-    const pallet = this.set('pallet', 'wood_plank_weathered|x2.4', () => this.palletGeo());
+    const drum = this.set('drum', 'steel_rusted', () => this.drumGeo());
+    const crate = this.set('crate', 'wood_plank_weathered', () => this.crateGeo(0.62));
+    const pallet = this.set('pallet', 'wood_plank_weathered', () => this.palletGeo());
     const jerry = this.set('jerry', 'iron_painted_chipped', () => this.jerryGeo());
     const gas = this.set('gas', 'iron_painted_chipped', () => this.gasGeo());
     const dirx = Math.cos(ry);
@@ -771,11 +781,11 @@ export class Props {
 // Faded, dusty, low-chroma: every tint here multiplies an already-authored PBR
 // albedo, so anything saturated turns into a toy. The two accent lists (cloth,
 // drums) are the exception and exist on purpose.
-const SANDBAG_TINTS = [0xbfb69e, 0xa89d84, 0xcfc6ac, 0x968c76, 0xb5aa8e];
+const SANDBAG_TINTS = [0x9a917c, 0x877e69, 0xa8a08a, 0x736b5a, 0x8f866f];
 const WOOD_TINTS = [0xc9bda6, 0xb0a48c, 0xd6cbb4, 0x9c9280];
 const DEBRIS_TINTS = [0xb9b3a8, 0xa39c90, 0xc6c0b4, 0x8e887e, 0xada38f];
 const DRUM_TINTS = [0x9b5f3a, 0x4a6b74, 0x8a8474, 0xa8763c, 0x5f6b52, 0xb4ada0];
-const CLOTH_TINTS = [0xd8d2c4, 0x6f93a8, 0xc4a86a, 0xa85a4a, 0x8d9b78, 0xe0dcd0];
+const CLOTH_TINTS = [0xe6e0d0, 0x7fa8c0, 0xdcb46a, 0xc4604a, 0x9aad84, 0xf0ece0];
 const GRASS_TINTS = [0xbfb488, 0xa8a072, 0xd2c79c, 0x93906c];
 const LEAF_TINTS = [0x8d9a68, 0x7a8a5c, 0xa3a878, 0x6d7a52];
 const FROND_TINTS = [0x8f9560, 0x7d8a55, 0xa2a06a, 0x6f7a4c];
@@ -891,4 +901,4 @@ function mergeLocal(parts) {
   return out;
 }
 
-export { mergeLocal, CLOTH_TINTS, DRUM_TINTS, DEBRIS_TINTS, GRASS_TINTS };
+export { mergeLocal };

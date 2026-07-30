@@ -537,7 +537,16 @@ export class Level {
     const k = this.kit;
     const rng = this.rng;
 
-    const n1 = { cx: -24, cz: -33, w: 17, d: 13.4, h: 13.6, rotY: 0.11 };
+    // The tall block sits due north; the north-WEST is deliberately kept low.
+    //
+    // A 17-degree sun is occluded by anything within 3.3 times its own height
+    // upwind of it, so a tall block here would put the whole square and the hall's
+    // interior in permanent shade. Instead the corridor the sun actually travels
+    // — from the hall's north-wall blast hole out over (-26, -26) and (-34, -37) —
+    // is kept under the ray's height at every point along it, so the evening light
+    // reaches the hall floor and lands in the lower right of the interior pose.
+    // Checked by casting the ray, not by eye.
+    const n1 = { cx: -18, cz: -33.5, w: 12.5, d: 13.4, h: 13.6, rotY: 0.11 };
     k.building(e, {
       ...n1,
       mat: 'plaster_painted',
@@ -560,9 +569,35 @@ export class Level {
       ],
       roof: { parapet: 0.85 },
     });
-    this.props.waterTank('north', -30, 13.8, -29, 0.2);
-    this.props.dish('north', -18.5, 14.7, -30.5, -1.0);
-    this.props.dish('north', -21, 14.6, -37, -2.1);
+    this.props.waterTank('north', -20.5, 13.8, -29.5, 0.2);
+    this.props.dish('north', -14.5, 14.7, -31, -1.0);
+
+    // The north-west block, kept to two storeys so the sun comes over it. Its low
+    // roofline against the taller blocks either side is also the skyline's biggest
+    // step, which is what the establishing shot needs on that side.
+    const n1b = { cx: -31, cz: -31, w: 13, d: 12, h: 6.2, rotY: -0.1 };
+    k.building(e, {
+      ...n1b,
+      mat: 'brick_red',
+      tint: new THREE.Color(HUE.clay),
+      trimTint: new THREE.Color(HUE.bone),
+      hollow: true,
+      stringCourse: true,
+      sides: [
+        {
+          openings: k.windowGrid({ length: n1b.w, floors: 2, rng, bay: 2.9, doors: [{ x: 3.0, w: 1.3 }] }),
+          balconies: [{ x: -2.6, y: 3.4, width: 2.8, depth: 1.1 }],
+        },
+        { openings: k.windowGrid({ length: n1b.w, floors: 2, rng, bay: 3.1, skip: 0.4 }) },
+        { openings: k.windowGrid({ length: n1b.d, floors: 2, rng, bay: 3.0, skip: 0.35 }) },
+        { openings: k.windowGrid({ length: n1b.d, floors: 2, rng, bay: 3.2, skip: 0.4 }) },
+      ],
+      roof: { parapet: 0.6, collapsed: { x: 2.2, z: -2.0, w: 4.2, d: 4.0 } },
+    });
+    this.props.dish('north', -26.5, 7.3, -26, -1.4);
+    this.props.waterTank('north', -34, 6.9, -34, 0.5);
+    this.props.grassLine('north', -26, -20, -25, -26, 18, 0.7);
+    this.props.scatterDebris('north', -25, -22, 2.2, 4, 22);
 
     /* --- centre-north hero block, rotated so its west flank catches sun --- */
     const n2 = { cx: -1.5, cz: -30, w: 17.5, d: 13.5, h: 9.8, rotY: -0.26 };

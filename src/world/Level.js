@@ -73,7 +73,7 @@ const TILE_MULT = {
   corrugated_metal: 3.4,
   wood_plank_weathered: 2.6,
   wood_ply: 2.2,
-  sandbag_canvas: 5.0,
+  sandbag_canvas: 3.4,
   camo_fabric: 3.0,
   rubber: 3.5,
   glass_dirty: 1.6,

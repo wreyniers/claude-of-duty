@@ -606,14 +606,21 @@ export const MATERIAL_RECIPES = {
         c = mixc(c, iron, inside);
         c = mixc(c, rust, rim * 0.8 + inside * orange[i] * 0.35);
         b.rgb(i, ...c);
+        // What a chip exposes is corroded iron, not a polished panel: 0.62, not the
+        // 0.24 this had. At 0.24 with metalness near 1 the chip mask stopped being
+        // damage and became a mirror — every chip on the wrecked car took the sun
+        // as a hard blown white blotch three stops over a sunlit plaster wall, over
+        // a body sitting at a tenth of that. Enamel keeps its own gloss; it is a
+        // dielectric with F0 pinned at 0.04 and cannot blow out the same way.
         b.rough[i] = rgh(
-          (1 - inside) * (0.26 + orange[i] * 0.09 - burnish * 0.1) + inside * 0.24 + rim * 0.45 + scratch[i] * 0.04
+          (1 - inside) * (0.26 + orange[i] * 0.09 - burnish * 0.1) + inside * 0.62 + rim * 0.45 + scratch[i] * 0.04
         );
         // Paint is a dielectric, so its own metalness stays 0 — but where the film
         // has burnished thin the steel underneath starts to show through, and that
         // partial metal is what gives the polished stretches a coloured highlight
-        // instead of a white one.
-        b.metal[i] = clamp01(inside * 0.9 * (1 - rim * 0.6) + burnish * 0.3 * (1 - inside));
+        // instead of a white one. Partial is the operative word: this is a hint of
+        // metal under a worn coat, not exposed bright steel.
+        b.metal[i] = clamp01(inside * 0.45 * (1 - rim * 0.6) + burnish * 0.12 * (1 - inside));
         b.aoMul[i] = 1 - inside * 0.2;
       });
     },

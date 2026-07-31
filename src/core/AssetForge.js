@@ -267,18 +267,46 @@ export class AssetForge {
     if (!overrides) return m;
 
     // Variant cache: two props asking for the same tint at the same tiling share
-    // one material, which keeps the program/uniform switches down.
-    let vkey = null;
-    try {
-      vkey = `${key}|${JSON.stringify(overrides)}`;
+    // one material, which keeps the program/uniform switches down. The key is
+    // built by hand rather than by JSON.stringify because an override can hold a
+    // Texture, and Texture.toJSON on a render-target texture has no image to write
+    // — it logs a warning for every rig part before it throws, which the capture
+    // harness then reports as two dozen warnings from a working boot.
+    let vkey = `${key}`;
+    for (const k of Object.keys(overrides).sort()) {
+      const v = overrides[k];
+      const id =
+        v == null || typeof v !== 'object'
+          ? String(v)
+          : Array.isArray(v)
+            ? v.join(',')
+            : v.isColor
+              ? v.getHexString()
+              : v.uuid || null;
+      if (id === null) {
+        vkey = null; // an override this cannot name; clone rather than mis-share
+        break;
+      }
+      vkey += `|${k}=${id}`;
+    }
+    if (vkey) {
       const hit = this._variants.get(vkey);
       if (hit) return hit;
-    } catch {
-      /* non-serialisable override (a Texture, a Color) — just clone */
     }
 
     const clone = m.clone();
     clone.name = `${key}#`;
+    // Material.copy() copies parameters, not behaviour: it leaves onBeforeCompile
+    // and customProgramCacheKey on the prototype, where they are no-ops. Every
+    // surface in the level comes through here (the level always passes a uvScale),
+    // so without these two lines the entire world-space macro layer — the
+    // anti-tiling variation, the grime, the rain runs, the dust film, the near-field
+    // detail — is silently compiled out of every material that actually gets drawn,
+    // and only a base material nobody asks for keeps it.
+    if (Object.prototype.hasOwnProperty.call(m, 'onBeforeCompile')) {
+      clone.onBeforeCompile = m.onBeforeCompile;
+      clone.customProgramCacheKey = m.customProgramCacheKey;
+    }
     const uvScale = overrides.uvScale ?? overrides.repeat;
     for (const [k, v] of Object.entries(overrides)) {
       if (k === 'uvScale' || k === 'repeat') continue;
@@ -786,6 +814,16 @@ void main() {`
       const env = this.game.scene?.environment;
       if (env) o.envMap = env;
       m = this.material(recipe, o);
+      // The rig is drawn by its own camera and rides with the player, so a field
+      // evaluated from world position swims across the weapon as you walk. The
+      // macro layer describes where a surface *is* in the town; a view model is not
+      // anywhere in the town. Its own maps carry it. (Safe on the shared variant:
+      // a rig material always carries the envMap override, so its cache key is
+      // never the one a level surface asks for.)
+      if (Object.prototype.hasOwnProperty.call(m, 'onBeforeCompile')) {
+        delete m.onBeforeCompile;
+        delete m.customProgramCacheKey;
+      }
       this._rigMaterials.set(key, m);
     }
     return m;

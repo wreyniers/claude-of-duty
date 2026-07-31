@@ -18,21 +18,27 @@ const GROUND_CHROMA = new THREE.Color(1.0, 0.66, 0.4);
  * Luminance of the hemisphere's lower half as a fraction of its upper half.
  *
  * This is the whole of what a down-facing surface gets from the hemisphere, and a
- * quarter — two stops down — was measured to be far too little. An awning soffit
- * seen from underneath graded to rgb(32,31,26) and an interior ceiling to 44.8,
- * both about 12-17% of range, against sunlit paving in the same frames near 200.
- * Two stops is what a *shadowed* stone square gives back; the paving under a
- * golden-hour awning is not shadowed, it is the brightest thing in the level, and
- * the soffit above it sees almost nothing else. 0.42 is 1.25 stops down, which is
- * the reflectance of dry limestone paving under a low sun rather than of the same
- * paving in its own shade.
+ * quarter — two stops down — was measured to be too little. An awning soffit seen
+ * from underneath graded to rgb(33,32,27) and an interior ceiling to 44.8, about
+ * 13-17% of range, against sunlit paving in the same frames near 200. Two stops is
+ * what a *shadowed* stone square gives back; the paving under a golden-hour awning
+ * is not shadowed, it is the brightest thing in the level, and the soffit above it
+ * sees almost nothing else.
  *
- * The hemisphere is a well-shaped term — 1.0 / 0.71 / 0.42 to a floor, a wall and
+ * 0.34 rather than the 0.42 the arithmetic first asked for: this half is the only
+ * strongly chromatic term in the fill (rgb 1 / 0.69 / 0.43 before it is scaled),
+ * so buying the whole soffit lift here turned an olive canvas awning orange —
+ * measured r/b 2.4 against the 1.26 it started at. Most of the lift moved to
+ * uCsmSkyVis's soffit weight instead, which is sky-coloured, and the two together
+ * hold the soffit's original hue while brightening it: r/b 1.26 -> 1.42 for a
+ * 1.25x luminance gain, same tree, same pose, 960x540.
+ *
+ * The hemisphere is a well-shaped term — 1.0 / 0.67 / 0.34 to a floor, a wall and
  * a soffit — but it is only half the fill, and the env map's diffuse half has to
  * agree in sign or the orientation step cancels: see uCsmSkyVis in
  * CascadedShadows, raised in step with this.
  */
-const GROUND_FRACTION = 0.42;
+const GROUND_FRACTION = 0.34;
 
 /**
  * How far the hemisphere's *sky* half is pulled off the warm bounce back toward
@@ -50,8 +56,13 @@ const GROUND_FRACTION = 0.42;
  *
  * The ground half stays on the raw warm bounce: light arriving from below has
  * been off the paving and is not sky-coloured at all.
+ *
+ * Nudged from 0.45 because the hemisphere's share of the fill went up with
+ * iblFillFactor below (roughly half to roughly three fifths of what an up-facing
+ * surface receives), and at the old mix that alone would have taken a little more
+ * blue out of open shade than the extra light was worth.
  */
-const SKY_MIX = 0.45;
+const SKY_MIX = 0.52;
 
 /**
  * The key is Sky's `sunIrradiance` times this.
@@ -124,24 +135,29 @@ export class Lighting {
      * fraction of the sky fill but the strength of the bounce term the hemisphere
      * takes over — see _syncSky.
      *
-     * 2.03x over the 1.18 that four of five captures were graded at, where the
-     * whole midground of `silhouette` sat between 60 and 80 (lit facade 73.8,
-     * shade facade 61.3, paving 75.6) and the histogram's top five bins were
-     * empty. Through the ACES fit, display 70 is scene-linear 0.062 and display
-     * 105 is 0.107, so open shade needed about 1.75x more light and nothing else.
+     * 1.9x over the 1.18 four of five captures were graded at, where the whole
+     * midground of `silhouette` sat between 60 and 80 (lit facade 73.8, shade
+     * facade 61.3, paving 75.6) and the histogram's top five bins were empty.
+     * Through the ACES fit, display 70 is scene-linear 0.062 and display 105 is
+     * 0.107, so open shade needed about 1.75x more light and nothing else.
      *
-     * Split roughly evenly with uCsmSkyVis rather than taken all here, because
-     * these two carry different chroma — the hemisphere the warm first bounce, the
-     * dome the sky — and moving the fill onto one of them would recolour the
-     * shadows. Weighted slightly toward the hemisphere anyway (2.03x against
-     * 1.41x) because bounce is the term this renderer genuinely has no source
-     * for, whereas pushing the dome much past unit irradiance is inventing sky.
+     * Split with uCsmSkyVis rather than taken all here, because these two carry
+     * different chroma — the hemisphere the warm first bounce, the dome the sky —
+     * and moving the whole lift onto either one recolours the shade. Held slightly
+     * on the hemisphere's side because bounce is the term this renderer genuinely
+     * has no source for, whereas pushing the dome much past unit irradiance is
+     * inventing sky.
+     *
+     * Measured on this tree at 960x540, this pair against the old one: a shaded
+     * facade 63.8 -> 81.1, open ground 26.1 -> 33.4, an awning soffit 32.2 ->
+     * 40.1; at 320x180 on the `silhouette` pose, shade facade 55.7 -> 83.3, lit
+     * facade 83.7 -> 105.1, paving 53.3 -> 70.6.
      *
      * Fill stays close to free at the top of the histogram: at ~30:1 key-to-fill
      * on sunlit paving a 1.75x fill adds about 2% to the lit surface and 75% to
      * the shade it is read against.
      */
-    this.iblFillFactor = 2.4;
+    this.iblFillFactor = 2.25;
     /**
      * `scene.environmentIntensity`, i.e. how much of the sky's IBL reaches the
      * world. Not a multiplier on Materials' authored figures: Three *replaces*

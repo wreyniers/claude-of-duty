@@ -134,19 +134,26 @@ export class CascadedShadows {
        * this renderer that can brighten shade without touching a highlight.
        *
        * Both figures went up again after four of five captures graded 1.5-2 stops
-       * under. The soffit term moved most (0.45 -> 0.72) because down-facing
-       * surfaces were the worst of it — an awning underside at rgb(32,31,26), an
-       * interior ceiling at 44.8 — and because 0.45 was reading a soffit as though
-       * the ground below it were as dark as the sky above is bright, which under a
-       * golden-hour sun over pale paving it is not. Net of envFillScale a
-       * sky-facing surface now takes 1.25 of the dome's diffuse irradiance and a
-       * soffit 0.46, against 0.88 and 0.29. Past-unit on the open end is the
-       * bounce off the sunlit facades that the dome cube does not contain; the
-       * step between the two orientations narrows from 3.1:1 to 2.7:1, which is
-       * still a plain orientation read and closer to what a walled square with a
-       * bright floor actually delivers.
+       * under. The soffit term moved most, 0.45 -> 1.15, for two reasons. It was
+       * the worst of the underexposure — an awning underside at rgb(33,32,27), an
+       * interior ceiling at 44.8 — because 0.45 reads a soffit as though the ground
+       * below it were as dark as the sky above is bright, which under a low sun
+       * over pale paving it is not. And it is the *cool* way to light a soffit:
+       * Lighting's hemisphere can deliver the same photons but only in the warm
+       * bounce chroma, and buying the lift there instead turned an olive awning
+       * orange (r/b 2.4 against 1.26). Lit from here the same surface comes out
+       * 1.25x brighter at r/b 1.42.
+       *
+       * Net of envFillScale a sky-facing surface now takes 1.25 of the dome's
+       * diffuse irradiance and a soffit 0.74, against 0.88 and 0.29. Past-unit on
+       * the open end is the bounce off the sunlit facades that the dome cube does
+       * not contain. The step between the two orientations narrows from 3.1:1 to
+       * 1.7:1 here, but the hemisphere still runs 2.9:1 across the same two
+       * orientations, so the combined fill keeps a ~2.2:1 read — about a stop
+       * between a floor and a soffit, which is what a walled square with a bright
+       * floor actually delivers.
        */
-      uCsmSkyVis: { value: new THREE.Vector3(0.72, 1.95, 3.2) },
+      uCsmSkyVis: { value: new THREE.Vector3(1.15, 1.95, 3.2) },
       uCsmDebug: { value: 0 },
     };
 

@@ -755,6 +755,53 @@ void main() {`
     mat.customProgramCacheKey = () => key;
   }
 
+  /**
+   * Wrap diffuse, for a surface light travels a little way inside before leaving.
+   *
+   * Skin is not a Lambertian shell: a millimetre of dermis carries red light
+   * around the terminator, so the boundary between lit and unlit on a finger is a
+   * wide warm band and not the hard cosine a dielectric gets. A view model's hands
+   * are almost entirely cylinders seen side-on, which means the terminator is most
+   * of what is on screen — with a plain cosine the limb is either lit or it is
+   * not, and a limb with no terminator reads as painted plastic however good its
+   * maps are.
+   *
+   * Added at the diffuse sum rather than inside the light loop, because that is
+   * the one place Three leaves the shading normal, the light direction and the
+   * surface colour all in scope at once, and because a second BRDF in the loop
+   * would cost every light on the rig rather than only the key.
+   */
+  _patchSubsurface(mat, cfg) {
+    const amount = cfg.amount ?? 0.4;
+    const wrap = cfg.wrap ?? 0.5;
+    const tint = new THREE.Color(cfg.tint ?? 0xc8503a);
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uSSS = { value: new THREE.Vector2(amount, wrap) };
+      shader.uniforms.uSSSTint = { value: tint };
+      shader.fragmentShader = shader.fragmentShader
+        .replace('void main() {', 'uniform vec2 uSSS;\nuniform vec3 uSSSTint;\nvoid main() {')
+        .replace(
+          'vec3 totalDiffuse = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse;',
+          `vec3 sssAdd = vec3( 0.0 );
+	#if NUM_DIR_LIGHTS > 0
+		// The key only. A fill has no terminator to soften, and the band the key's
+		// own cosine leaves behind is the entire point of the term.
+		float sssNL = dot( normal, directionalLights[ 0 ].direction );
+		float sssWrap = clamp( ( sssNL + uSSS.y ) / ( 1.0 + uSSS.y ), 0.0, 1.0 );
+		// Only what the cosine did not already deliver, so the lit side keeps the
+		// albedo it was authored with and only the shading boundary warms.
+		sssAdd = diffuseColor.rgb * uSSSTint * directionalLights[ 0 ].color
+			* ( uSSS.x * sssWrap * ( 1.0 - clamp( sssNL, 0.0, 1.0 ) ) );
+	#endif
+	vec3 totalDiffuse = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse + sssAdd;`
+        );
+    };
+    // Same reasoning as the macro key: onBeforeCompile is not part of Three's
+    // program cache, so a patched material must not share a program with an
+    // unpatched one that happens to carry the same parameters.
+    mat.customProgramCacheKey = () => 'forge-sss-1';
+  }
+
   /* ------------------------------------------------- generic small textures */
 
   _registerUtilityTextures() {
@@ -842,6 +889,11 @@ void main() {`
         delete m.onBeforeCompile;
         delete m.customProgramCacheKey;
       }
+      // Re-applied after that delete rather than before it: subsurface is a fact
+      // about the substance and not about where the substance is standing, so it
+      // is the one injection a view model part keeps.
+      const sss = MATERIAL_RECIPES[this._resolve(recipe)]?.subsurface;
+      if (sss) this._patchSubsurface(m, sss);
       this._rigMaterials.set(key, m);
     }
     return m;
@@ -909,6 +961,60 @@ function chamferBox(w, h, d, r = 0.004) {
 /** Cylinder lying along Z, which is the axis every part of a rifle runs on. */
 function tubeZ(r1, r2, len, seg = 10, open = false) {
   return new THREE.CylinderGeometry(r1, r2, len, seg, 1, open).rotateX(Math.PI / 2);
+}
+
+/**
+ * Tube along Z with an arbitrary radius profile and an elliptical section.
+ *
+ * `prof` is a list of `[t, rx, ry]` running from t=0 at the +Z end to t=1 at -Z,
+ * which is the end convention `limb()` already uses. A limb built from one tapered
+ * cylinder has perfectly straight silhouette edges and a single unbroken cosine
+ * across it, and that is the whole of what makes an arm read as a plastic slab: a
+ * real forearm is narrow and flattened at the wrist, swells through the flexor
+ * belly a third of the way to the elbow, and the waist between the two is what the
+ * eye uses to find the wrist at all. Normals are computed rather than derived
+ * analytically because the profile is piecewise linear, and the averaged normal is
+ * what smooths the joins between its segments.
+ */
+function profileTubeZ(len, prof, seg = 12) {
+  const rings = prof.length;
+  const nv = rings * (seg + 1) + 2;
+  const pos = new Float32Array(nv * 3);
+  const idx = [];
+  for (let r = 0; r < rings; r++) {
+    const [t, rx, ry] = prof[r];
+    const z = (0.5 - t) * len;
+    for (let s = 0; s <= seg; s++) {
+      const a = (s / seg) * Math.PI * 2;
+      const o = (r * (seg + 1) + s) * 3;
+      pos[o] = Math.cos(a) * rx;
+      pos[o + 1] = Math.sin(a) * ry;
+      pos[o + 2] = z;
+    }
+  }
+  for (let r = 0; r < rings - 1; r++) {
+    for (let s = 0; s < seg; s++) {
+      const i0 = r * (seg + 1) + s;
+      idx.push(i0, i0 + seg + 1, i0 + 1, i0 + 1, i0 + seg + 1, i0 + seg + 2);
+    }
+  }
+  // Flat caps at both ends. The wrist end is hidden by the hand and the elbow end
+  // by the sleeve, but an open tube shows its own backfaces the moment either one
+  // moves, and a hole in a forearm is a worse artefact than two hidden triangles.
+  const cA = rings * (seg + 1);
+  const cB = cA + 1;
+  pos[cA * 3 + 2] = len * 0.5;
+  pos[cB * 3 + 2] = -len * 0.5;
+  const last = (rings - 1) * (seg + 1);
+  for (let s = 0; s < seg; s++) {
+    idx.push(cA, s + 1, s);
+    idx.push(cB, last + s, last + s + 1);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
 }
 
 /**
@@ -1023,12 +1129,22 @@ class RigBuilder {
    * of as the start (the wrist, for a forearm).
    */
   limb(part, mat, a, b, rA, rB, seg = 8) {
+    return this.put(part, mat, tubeZ(rA, rB, this._axis(a, b), seg), this._M);
+  }
+
+  /** As `limb`, but with a `[t, rx, ry]` profile in place of two end radii. */
+  shapedLimb(part, mat, a, b, prof, seg = 12) {
+    return this.put(part, mat, profileTubeZ(this._axis(a, b), prof, seg), this._M);
+  }
+
+  /** Length between two points, leaving the a->b frame on `this._M`. */
+  _axis(a, b) {
     _va.set(a[0], a[1], a[2]);
     _vb.set(b[0], b[1], b[2]);
     const len = _va.distanceTo(_vb);
-    const M = new THREE.Matrix4().lookAt(_va, _vb, UP);
-    M.setPosition(_va.lerp(_vb, 0.5));
-    return this.put(part, mat, tubeZ(rA, rB, len, seg), M);
+    this._M = new THREE.Matrix4().lookAt(_va, _vb, UP);
+    this._M.setPosition(_va.lerp(_vb, 0.5));
+    return len;
   }
 
   group(name, children) {
@@ -1144,19 +1260,29 @@ function buildViewmodelRig(forge) {
     r.put('muzzle', 'blued', tubeZ(0.019, 0.019, 0.005, 10), trs(0, AXIS, -0.585 - i * 0.015));
   }
 
-  // Optic: mount, two rings, tube, hood, glass at both ends and a lit dot. The
-  // glass is the only transparent thing on the rig and it is what sells the optic
-  // as an optic rather than as a black tube.
+  // Optic: mount, two rings, tube, hood, glass at both ends and a lit reticle.
+  // 24 sides on everything round here, not 12: this is the one circle on the rig
+  // the eye looks straight down, and at 12 its outline was a visible dodecagon
+  // before aliasing had any chance to make it worse.
   r.put('optic', 'anodised', chamferBox(0.044, 0.022, 0.1, 0.004), trs(0, AXIS + 0.043, -0.16));
-  r.put('optic', 'anodised', tubeZ(0.021, 0.021, 0.115, 12), trs(0, AXIS + 0.073, -0.16));
+  r.put('optic', 'anodised', tubeZ(0.021, 0.021, 0.115, 24), trs(0, AXIS + 0.073, -0.16));
   for (const z of [-0.115, -0.205]) {
-    r.put('optic', 'anodised', tubeZ(0.026, 0.026, 0.011, 12), trs(0, AXIS + 0.073, z));
+    r.put('optic', 'anodised', tubeZ(0.026, 0.026, 0.011, 24), trs(0, AXIS + 0.073, z));
   }
-  r.put('optic', 'anodised', tubeZ(0.0245, 0.0245, 0.022, 12, true), trs(0, AXIS + 0.073, -0.228));
+  r.put('optic', 'anodised', tubeZ(0.0245, 0.0245, 0.022, 24, true), trs(0, AXIS + 0.073, -0.228));
   r.put('optic', 'anodised', tubeZ(0.008, 0.008, 0.02, 8), trs(0, AXIS + 0.09, -0.16, 0, 0, 0));
-  r.put('optic', 'glass', tubeZ(0.019, 0.019, 0.003, 12), trs(0, AXIS + 0.073, -0.216));
-  r.put('optic', 'glass', tubeZ(0.019, 0.019, 0.003, 12), trs(0, AXIS + 0.073, -0.104));
-  r.put('optic', 'emitter', tubeZ(0.0032, 0.0032, 0.003, 8), trs(0, AXIS + 0.073, -0.13));
+  r.put('optic', 'glass', tubeZ(0.019, 0.019, 0.003, 24), trs(0, AXIS + 0.073, -0.216));
+  // The ocular has to sit *in front of* the tube's own end cap. Behind it, the cap
+  // is what the eye sees down the sight line, and an anodised disc taking a sky
+  // reflection is exactly the flat slate plate the review measured where the sight
+  // picture should be. A couple of millimetres of clearance is enough for the
+  // depth test to keep the glass in front and still leave the rim showing.
+  r.put('optic', 'glass', tubeZ(0.019, 0.019, 0.003, 24), trs(0, AXIS + 0.073, -0.1005));
+  // Reticle: a dot inside a ring, floated a millimetre proud of the ocular so it
+  // occludes the glass instead of being blended behind it. This is the single
+  // most-looked-at region of an ADS frame and it was empty.
+  r.put('optic', 'emitter', new THREE.CircleGeometry(0.0016, 12), trs(0, AXIS + 0.073, -0.0985));
+  r.put('optic', 'emitter', new THREE.TorusGeometry(0.0105, 0.0006, 4, 28), trs(0, AXIS + 0.073, -0.0985));
   // Backup irons, folded flat so they do not cross the optic's sight line.
   r.put('receiver', 'blued', chamferBox(0.012, 0.01, 0.028, 0.002), trs(0, AXIS + 0.052, -0.02));
   r.put('handguard', 'blued', chamferBox(0.012, 0.01, 0.026, 0.002), trs(0, AXIS + 0.041, -0.44));
@@ -1232,14 +1358,36 @@ function buildRigHands(r, AXIS) {
   const finger = (part, base, len, rad, curl) => {
     const M = base.clone();
     let rr = rad;
+    // The metacarpal head. A finger that leaves the palm as a smooth cylinder is
+    // most of what makes a closed hand read as a mitten: the knuckle row is the
+    // one silhouette feature saying there are separate bones under the skin, and
+    // on a hand wrapped round a grip it is the only part that catches the key.
+    r.put(part, 'skin', new THREE.SphereGeometry(rr * 1.22, 8, 6), base.clone());
     for (let s = 0; s < 3; s++) {
       const L = len * [1, 0.76, 0.6][s];
       r.put(part, 'skin', tubeZ(rr * 0.88, rr, L, 7), M.clone().multiply(trs(0, 0, -L / 2)));
-      r.put(part, 'skin', new THREE.SphereGeometry(rr * 0.95, 7, 5), M.clone().multiply(trs(0, 0, -L)));
+      const knuckle = rr * (s === 0 ? 1.06 : 0.95);
+      r.put(part, 'skin', new THREE.SphereGeometry(knuckle, 7, 5), M.clone().multiply(trs(0, 0, -L)));
       M.multiply(trs(0, 0, -L)).multiply(new THREE.Matrix4().makeRotationX(-curl));
       rr *= 0.87;
     }
   };
+
+  /**
+   * Wrist-to-elbow profile, in fractions of the limb's own length. The waist at
+   * t=0 is the wrist — the narrowest part of an arm, and flattened front to back —
+   * and the swell at a fifth is the flexor belly. `limb`'s single taper had the
+   * wrist as the *wide* end of a cone, which is backwards, and the straight
+   * silhouette that produced is what the review measured as a slab.
+   */
+  const FOREARM = [
+    [0, 0.022, 0.017],
+    [0.08, 0.025, 0.021],
+    [0.22, 0.035, 0.031],
+    [0.42, 0.041, 0.037],
+    [0.72, 0.041, 0.038],
+    [1, 0.038, 0.036],
+  ];
 
   // Right hand on the pistol grip. rz = -90 deg puts the fingers' flex direction
   // toward -X, so they close around the front of the grip.
@@ -1258,7 +1406,15 @@ function buildRigHands(r, AXIS) {
   // Thumb across the back of the grip, angled down: two segments, and the one
   // that is visible from the sight is the near knuckle.
   finger('hand_right', trs(0.02, gy + 0.06, 0.085, -0.5, 0.7, -Math.PI / 2), 0.03, 0.011, 0.55);
-  r.limb('forearm_right', 'skin', [0.042, gy - 0.05, 0.085], [0.15, gy - 0.24, 0.31], 0.029, 0.042, 9);
+  // Thenar pad: the muscle at the base of the thumb, and the only broad convex
+  // surface a gripping hand has for the key light to roll across.
+  const thenar = new THREE.SphereGeometry(0.019, 9, 7).scale(0.85, 1.5, 1.25);
+  r.put('hand_right', 'skin', thenar, trs(0.033, gy + 0.02, 0.086));
+  r.shapedLimb('forearm_right', 'skin', [0.042, gy - 0.05, 0.085], [0.15, gy - 0.24, 0.31], FOREARM, 12);
+  // Ulnar styloid: the bone standing proud on the little-finger side of every
+  // wrist. One sphere, and it is what stops the wrist reading as a hose pushed
+  // into a sleeve.
+  r.put('forearm_right', 'skin', new THREE.SphereGeometry(0.009, 7, 5), trs(0.052, gy - 0.055, 0.088));
   r.limb('forearm_right', 'cuff', [0.115, gy - 0.185, 0.255], [0.17, gy - 0.28, 0.35], 0.046, 0.05, 9);
 
   // Left hand C-clamped on the handguard. The chain has to *circumscribe* the
@@ -1293,7 +1449,10 @@ function buildRigHands(r, AXIS) {
   // Thumb along the top of the rail rather than round it: on a rail-topped
   // handguard that is where a thumb physically goes.
   finger('hand_left', trs(-0.03, AXIS + 0.044, hz + 0.036, 0, -0.15, 0), 0.032, 0.0105, 0.22);
-  r.limb('forearm_left', 'skin', [-0.062, AXIS - 0.05, hz + 0.03], [-0.21, AXIS - 0.24, hz + 0.23], 0.029, 0.042, 9);
+  const thenarL = new THREE.SphereGeometry(0.018, 9, 7).scale(0.85, 1.45, 1.2);
+  r.put('hand_left', 'skin', thenarL, trs(-0.05, AXIS + 0.03, hz + 0.024));
+  r.shapedLimb('forearm_left', 'skin', [-0.062, AXIS - 0.05, hz + 0.03], [-0.21, AXIS - 0.24, hz + 0.23], FOREARM, 12);
+  r.put('forearm_left', 'skin', new THREE.SphereGeometry(0.009, 7, 5), trs(-0.073, AXIS - 0.055, hz + 0.032));
   r.limb('forearm_left', 'cuff', [-0.17, AXIS - 0.19, hz + 0.175], [-0.235, AXIS - 0.28, hz + 0.27], 0.046, 0.05, 9);
 }
 

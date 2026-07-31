@@ -28,6 +28,7 @@ import { clamp01, smoothstep } from './Noise.js';
  *   heal        world-space gate for the damage this recipe writes to b.damage
  *   dust        strength of the up-facing dust film (false disables)
  *   translucency thin-surface transmission for a sheet the sun gets through
+ *   subsurface  wrap diffuse for a surface light travels a millimetre inside
  *   build(b)    paint the fields
  *
  * The last four are all world-space: they are things about a surface that a
@@ -124,18 +125,30 @@ export const MATERIAL_RECIPES = {
       const pale = lin(0xb7b0a0);
       const grimy = lin(0x413d35);
       b.normalStrength = 0.85;
-      b.aoRelief = 0.32;
+      b.aoRelief = 0.42;
       b.each((i, u, v) => {
-        // Form-board seams: cast concrete remembers the shuttering it was poured
-        // against, and those horizontal lines are most of what says "cast".
-        // One board line per tile, not two: at a metre per tile, two reads as
-        // planking rather than as shuttering.
-        const seam =
-          smoothstep(0.014, 0, Math.abs(tri(v) - 1)) * 0.8 + smoothstep(0.005, 0, Math.abs(tri(u * 0.5) - 1)) * 0.12;
+        // Control joints. A slab is poured in bays and saw-cut so that it cracks
+        // where the cut is, and that cut is the only thing this recipe owns in the
+        // half-metre-to-two-metre band — which is the band the square's paving is
+        // read at from ten metres. Everything else here is aggregate, aggregate is
+        // under a pixel at that range, and without the joints the largest surface
+        // in the frame resolves to a low-frequency mottle and nothing else. Two
+        // bays per tile is a 1.25 m panel, which is what a footway is cut at.
+        const bay = cell(u, v, 2, 2);
+        const kerf = smoothstep(0.0075, 0.0015, bay.edge);
+        // The float rounds the arris off either side of the cut long before the
+        // saw touches it, so the groove has a shoulder. The shoulder is what
+        // catches the light; the kerf is what holds the shadow.
+        const shoulder = smoothstep(0.026, 0.0075, bay.edge) * (1 - kerf);
+        // Each bay was floated on its own pour and they differ in how much fines
+        // came up under the float, which is a value difference and not a hue one.
+        // Small, because the lattice is only 1.25 m and anything louder reads as
+        // the texture repeating rather than as concrete.
+        const bayTone = 0.965 + bay.id * 0.07;
         const pit = voidId[i] > 0.66 ? smoothstep(0.055 + (voidId[i] - 0.66) * 0.14, 0.01, voids[i]) : 0;
         const g = grain[i];
         const stain = clamp01(damp[i] * 1.5 - 0.35);
-        b.height[i] = 0.62 + (g - 0.5) * 0.34 - pit * 0.55 - seam * 0.24;
+        b.height[i] = 0.62 + (g - 0.5) * 0.34 - pit * 0.55 - kerf * 0.52 - shoulder * 0.07;
         let c = mixc(base, wet, stain * 0.7);
         // Exposed sand grains: only on the parts the cement skin has worn off, and
         // only in the top eighth of the cell field. At the density this recipe is
@@ -146,14 +159,16 @@ export const MATERIAL_RECIPES = {
         // mid-scale patch term in the macro shader is what should carry the
         // variation here, because it is the one that does not repeat.
         c = mixc(c, pale, agg[i] > 0.88 ? (agg[i] - 0.88) * 2.4 * smoothstep(0.45, 0.85, g) : 0);
-        c = mixc(c, grimy, pit * 0.55 + seam * 0.3);
+        c = mixc(c, grimy, pit * 0.55 + kerf * 0.6);
         b.rgb(i, ...c);
-        b.scale(i, 0.91 + g * 0.19);
+        b.scale(i, (0.91 + g * 0.19) * bayTone);
         // Traffic and rain polish the raised, exposed parts; the recessed
-        // laitance dust and the air voids stay chalky.
-        const polish = smoothstep(0.5, 0.95, g) * (1 - stain);
-        b.rough[i] = rgh(0.8 - polish * 0.3 + stain * 0.12 + pit * 0.18 + seam * 0.1);
-        b.aoMul[i] = 1 - pit * 0.3 - seam * 0.12;
+        // laitance dust and the air voids stay chalky. A joint's shoulder is the
+        // most walked-over line on a slab and polishes hardest, and the kerf under
+        // it is never touched at all and silts up.
+        const polish = smoothstep(0.5, 0.95, g) * (1 - stain) * (1 - kerf) + shoulder * 0.5;
+        b.rough[i] = rgh(0.8 - polish * 0.3 + stain * 0.12 + pit * 0.18 + kerf * 0.16);
+        b.aoMul[i] = 1 - pit * 0.3 - kerf * 0.45 - shoulder * 0.07;
       });
     },
   },
@@ -270,7 +285,10 @@ export const MATERIAL_RECIPES = {
     // surface shaded as a painted card and the only high-frequency signal on it
     // was the grade's grain. The correction is relief, not albedo — the two-tone
     // history recorded below is still the binding constraint on colour.
-    normalScale: 0.78,
+    // 1.0 and not 0.78, because the peel step measured under five degrees at its
+    // own edge, and a five-degree step is not a step: the patches read as stains
+    // printed on the wall rather than as places the film has come off.
+    normalScale: 1.0,
     macro: { scale: 0.045, albedo: 0.17, rough: 0.13, grime: 0.3, tint: 0x5c5347, patch: 0.13, patchFreq: 0.55, runs: 0.5, runFreq: 1.5 },
     // Limewash over plaster is genuinely smooth, so what the near field wants back
     // is the trowel stipple, not aggregate — but it wants it at a strength that
@@ -293,6 +311,15 @@ export const MATERIAL_RECIPES = {
       // through a tight threshold — irregular outline, ragged rim.
       const peel = b.warp(b.fbm({ freq: 6, octaves: 4, seed: 909 }), { freq: 13, amount: b.size * 0.022 });
       const cracks = b.ridge({ freq: 4, octaves: 5, seed: 17 });
+      // Runoff. Water sheds off every projecting course and carries the film's
+      // dirt down the face under it, and that stain is the only thing on a
+      // rendered facade with a direction to it. Stretched about 20:1 along v —
+      // which the level's triplanar projection puts along world up on any wall —
+      // because that is what gravity does to a stain. Without it this surface is
+      // isotropic in every band it owns, and an isotropic surface at twenty metres
+      // is speckle: the establishing shot's facades had nothing at all between the
+      // five-centimetre stipple and the whole-building macro drift.
+      const streak = b.warp(b.fbm({ freq: 24, freqY: 1.2, octaves: 3, seed: 611 }), { freq: 9, amount: b.size * 0.01 });
       // Crack damage is regional. A ridge network left ungated covers every square
       // metre of every wall in the town at the same density, and a pattern that
       // uniform stops reading as cracking and starts reading as wallpaper — which
@@ -306,22 +333,51 @@ export const MATERIAL_RECIPES = {
       // camouflage: it was the loudest thing in the interior frame and it made
       // every facade in the establishing shot look mottled.
       const under = lin(0xa39a89);
+      const soot = lin(0x7c7364);
       b.normalStrength = 0.95;
       // Raised with the peel step below: the horizon march is what puts the short
-      // shadow inside the patch, and at 0.4 it was marching over a 0.06 kerb.
-      b.aoRelief = 0.52;
-      b.each((i) => {
-        // Peeling is a hard-edged event: the paint film either is there or is
-        // not, so the mask keeps its tight transition and the roughness jumps
-        // across it — a soft blend there is what makes procedural paint look like
-        // a decal. The threshold is high, though: bare patches are a minority of
-        // a painted wall, and at a third of the surface they stop being damage and
-        // become the pattern.
-        const bare = smoothstep(0.7, 0.755, peel[i] + (trowel[i] - 0.5) * 0.18);
-        // A crack in a paint film is a line, not a channel: the threshold is high
-        // and narrow so only the ridge crest survives, and the regional gate keeps
-        // whole stretches of wall intact.
-        const crack = smoothstep(0.76, 0.94, cracks[i]) * smoothstep(0.46, 0.68, zone[i]);
+      // shadow inside the patch, and at 0.52 it was marching over a kerb a third
+      // of the height the step now has.
+      b.aoRelief = 0.68;
+      /**
+       * Peeling is a hard-edged event: the paint film either is there or is not,
+       * so the mask keeps its tight transition and the roughness jumps across it —
+       * a soft blend there is what makes procedural paint look like a decal. The
+       * threshold is high, though: bare patches are a minority of a painted wall,
+       * and at a third of the surface they stop being damage and become the
+       * pattern.
+       *
+       * A closure rather than a field because the colour pass below runs after a
+       * curvature pass over the finished height, and re-evaluating a smoothstep is
+       * cheaper than keeping four more Float32Arrays alive across it.
+       */
+      const bareAt = (i) => smoothstep(0.7, 0.755, peel[i] + (trowel[i] - 0.5) * 0.18);
+      // A crack in a paint film is a line, not a channel: the threshold is high
+      // and narrow so only the ridge crest survives, and the regional gate keeps
+      // whole stretches of wall intact.
+      const crackAt = (i) => smoothstep(0.76, 0.94, cracks[i]) * smoothstep(0.46, 0.68, zone[i]);
+      /**
+       * Ghost courses. Render laid over block masonry telegraphs the joints behind
+       * it long before any of it is lost, because the mortar shrinks and
+       * carbonates at a different rate from the block and the line comes through
+       * as a hairline hollow. Two courses per tile is a 47 cm block at this
+       * level's tiling, which puts the one architectural frequency this material
+       * was missing exactly where a facade gets read from across a square. Gated
+       * on the same regional field the cracks use, so intact stretches stay smooth
+       * and the wall does not turn into wallpaper.
+       *
+       * Uses `cell`'s shared scratch, so a caller has `CELL.fy` — where in the
+       * course this texel sits — available straight afterwards for the wash below.
+       */
+      const courseAt = (i, u, v) =>
+        smoothstep(0.0048, 0.0008, cell(u, v, 1, 2, 1).edge) * (0.3 + 0.7 * smoothstep(0.38, 0.72, zone[i]));
+      // A wash starts at a course and dies out about half a block below it, which
+      // is as far as shed water carries its dirt before the face dries.
+      const washAt = (i, fy) => clamp01(streak[i] * 1.7 - 0.62) * smoothstep(0.42, 0.96, fy);
+      b.each((i, u, v) => {
+        const bare = bareAt(i);
+        const crack = crackAt(i);
+        const course = courseAt(i, u, v);
         // What sells a peel is not the colour under it, it is the step at its
         // edge. The film has thickness, the last few millimetres before the tear
         // curl up off the substrate, and that lip is what catches a highlight and
@@ -334,14 +390,30 @@ export const MATERIAL_RECIPES = {
           (trowel[i] - 0.5) * 0.15 +
           (drag[i] - 0.5) * 0.15 +
           (stipple[i] - 0.5) * 0.06 -
-          bare * 0.13 +
-          lip * 0.075 -
+          bare * 0.32 +
+          lip * 0.18 -
           pit * 0.1 -
-          crack * 0.22;
+          crack * 0.22 -
+          course * 0.15;
+      });
+      // Curvature over the finished height, so roughness can tell the proud side
+      // of a step from the hollow side of it. This is the break-up the rubric asks
+      // for by name — polish on an exposed arris, grime in a crevice — and it is
+      // the only term here that knows which of the two it is looking at.
+      const cv = b.curv(b.height, 2);
+      b.each((i, u, v) => {
+        const bare = bareAt(i);
+        const crack = crackAt(i);
+        const course = courseAt(i, u, v);
+        const pit = smoothstep(0.22, 0.03, pin[i]) * bare;
+        const wash = washAt(i, CELL.fy);
+        const proud = clamp01(cv[i] * 22);
+        const hollow = clamp01(-cv[i] * 22);
         let c = mixc(paint, under, bare);
         c = mixc(c, lin(0x8a8271), crack * 0.75);
+        c = mixc(c, soot, wash * 0.42 + course * 0.3);
         b.rgb(i, ...c);
-        b.scale(i, 0.94 + trowel[i] * 0.1 + (drag[i] - 0.5) * 0.07 * bare);
+        b.scale(i, (0.94 + trowel[i] * 0.1 + (drag[i] - 0.5) * 0.07 * bare) * (1 - wash * 0.12));
         // Three roughness populations rather than two flat ones, because a single
         // 0.9 across a patch is what made the bare plaster read as a stain instead
         // of a surface: the sealed film, the crests of the trowel sweep that
@@ -349,8 +421,10 @@ export const MATERIAL_RECIPES = {
         // sheen wanders with the float drag.
         const film = 0.4 + stipple[i] * 0.1 - smoothstep(0.62, 0.95, trowel[i]) * 0.12;
         const substrate = 0.86 + (drag[i] - 0.5) * 0.18 + pit * 0.08;
-        b.rough[i] = rgh(film + (substrate - film) * bare + crack * 0.2);
-        b.aoMul[i] = 1 - crack * 0.3 - bare * 0.08 - pit * 0.14;
+        b.rough[i] = rgh(
+          film + (substrate - film) * bare + crack * 0.2 + wash * 0.16 + course * 0.14 - proud * 0.14 + hollow * 0.1
+        );
+        b.aoMul[i] = 1 - crack * 0.3 - bare * 0.08 - pit * 0.14 - course * 0.22 - hollow * 0.12;
       });
     },
   },
@@ -1100,7 +1174,12 @@ export const MATERIAL_RECIPES = {
   skin: {
     tile: 0.5,
     uvScale: 6,
-    normalScale: 0.55,
+    // Skin is the one surface in the frame the eye has a lifetime of reference
+    // for, and at 0.55 the only relief on it was sub-millimetre pore noise. What
+    // actually reads on a hand at thirty centimetres is the crease network over
+    // the knuckles, which is centimetres, so the map now authors that band and the
+    // scale has to be able to carry it.
+    normalScale: 1.0,
     physical: true,
     mat: {
       sheen: 0.25,
@@ -1109,28 +1188,65 @@ export const MATERIAL_RECIPES = {
       envMapIntensity: 0.9,
     },
     macro: false,
+    /**
+     * Wrap diffuse standing in for subsurface scattering. Light that enters skin a
+     * millimetre inside the terminator leaves it on the dark side, so the shading
+     * boundary on a finger is a wide warm band rather than the hard cosine a
+     * dielectric gets — and a first-person forearm is a cylinder seen side-on,
+     * which means the terminator is most of what is on screen. Without it the limb
+     * is either lit or it is not, and a limb with no terminator is the plastic
+     * slab the rubric names.
+     */
+    subsurface: { amount: 0.5, wrap: 0.55, tint: 0xd0492c },
     build(b) {
       const pores = b.cells({ freq: 46, jitter: 1, mode: 'f1', seed: 17 });
       const creases = b.warp(b.fbm({ freq: 7, freqY: 18, octaves: 4, seed: 5 }), { freq: 5, amount: b.size * 0.02 });
       const blotch = b.fbm({ freq: 4, octaves: 4, seed: 55 });
       const hair = b.fbm({ freq: 34, freqY: 34, octaves: 2, seed: 71 });
-      const mid = lin(0xba8b6c);
-      const pale = lin(0xd0a889);
-      const red = lin(0xa95f4c);
-      b.normalStrength = 0.6;
+      // Soft tissue over bone: the swell of a thenar pad, the ground between the
+      // tendons on the back of a hand. Deliberately isotropic, unlike every other
+      // directional field in this library — the rig's UVs come off a per-facet
+      // triplanar projection, so "along the limb" is not a fixed axis here and an
+      // anisotropic field lands as stripes running whichever way each facet points.
+      // That is exactly the "faint vertical scratch lines" the review names.
+      const flesh = b.warp(b.fbm({ freq: 10, octaves: 3, seed: 401 }), { freq: 5, amount: b.size * 0.03 });
+      // The crease network over a knuckle: a ridge field branches and closes the
+      // way skin creases do, where an fBm only pools. freq 24 against this
+      // recipe's half-metre tile puts a crease cell at 2 cm, which is the width of
+      // a finger — any coarser and a whole hand holds two cells and the network
+      // reads as marbling.
+      const fold = b.warp(b.ridge({ freq: 24, octaves: 2, seed: 823 }), { freq: 12, amount: b.size * 0.007 });
+      // Half a stop under the old values. At the view model's key intensity the
+      // old pale peach landed on the ACES shoulder, where the curve desaturates
+      // whatever it compresses: the hands came back at 235 with no hue and no
+      // terminator across them, which is most of the plastic-mitten read. Diffuse
+      // skin albedo is around 0.35 in the red and half that in the blue anyway.
+      const mid = lin(0x936d56);
+      const pale = lin(0xa9856d);
+      const red = lin(0x8a4a3c);
+      b.normalStrength = 0.85;
+      // Skin has no hard edge for a horizon march to catch — the creases are the
+      // only occluders and they are shallow — so a relief much over a third puts
+      // more AO on a hand than the sun ever takes off it.
       b.aoRelief = 0.4;
       b.each((i) => {
         const pore = smoothstep(0.16, 0.03, pores[i]);
         const crease = smoothstep(0.72, 0.95, creases[i]);
-        b.height[i] = 0.6 - pore * 0.16 - crease * 0.2 + (hair[i] - 0.5) * 0.04;
+        const line = smoothstep(0.66, 0.93, fold[i]);
+        const swell = flesh[i] - 0.5;
+        b.height[i] = 0.6 - pore * 0.16 - crease * 0.18 + swell * 0.3 - line * 0.2 + (hair[i] - 0.5) * 0.04;
         let c = mixc(mid, pale, blotch[i] * 0.85);
-        c = mixc(c, red, clamp01(blotch[i] * 1.5 - 0.55) * 0.7 + crease * 0.3);
+        // Blood sits close under a crease and in the fold over a knuckle, so those
+        // go red before anything else on a hand does.
+        c = mixc(c, red, clamp01(blotch[i] * 1.5 - 0.55) * 0.7 + crease * 0.3 + line * 0.3);
         b.rgb(i, ...c);
-        b.scale(i, 0.94 + hair[i] * 0.12 - pore * 0.1);
+        b.scale(i, 0.94 + hair[i] * 0.12 - pore * 0.1 + swell * 0.1);
         // Sebum sits on the raised areas and creases stay dry: that gradient is
         // what stops skin reading as painted rubber.
-        b.rough[i] = rgh(0.5 - smoothstep(0.55, 0.95, blotch[i]) * 0.16 + crease * 0.12 + pore * 0.06);
-        b.aoMul[i] = 1 - pore * 0.15 - crease * 0.2;
+        b.rough[i] = rgh(
+          0.5 - smoothstep(0.55, 0.95, blotch[i]) * 0.16 - swell * 0.14 + crease * 0.12 + line * 0.16 + pore * 0.06
+        );
+        b.aoMul[i] = 1 - pore * 0.15 - crease * 0.2 - line * 0.26;
       });
     },
   },

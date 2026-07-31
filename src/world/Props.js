@@ -434,10 +434,10 @@ export class Props {
       // Arch eyebrows: three short bars over each wheel. Without a lip the tyre
       // is a black disc pasted on the flank; with one the flank has a hole in it.
       for (const sz of [1.3, -1.28]) {
-        for (const a of [-0.62, 0, 0.62]) {
+        for (const a of [-1.0, -0.5, 0, 0.5, 1.0]) {
           put(
-            k.chamfer(0.13, 0.07, 0.24, 0.02),
-            at(px + sx * 0.03, 0.36 + Math.cos(a) * 0.5, sz + Math.sin(a) * 0.5, a),
+            k.chamfer(0.14, 0.07, 0.26, 0.02),
+            at(px + sx * 0.035, 0.36 + Math.cos(a) * 0.5, sz + Math.sin(a) * 0.5, a),
             col.clone().multiplyScalar(0.88)
           );
         }

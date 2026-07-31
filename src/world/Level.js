@@ -1155,11 +1155,11 @@ export class Level {
     this.props.scatterDebris('square', ix, iz, 1.7, 2.3, 14, { y: 0.1, brickRatio: 0.5 });
     // Grit banks against a kerb from both sides; that is what makes a kerb read
     // as something the street has been sweeping past for years.
-    for (const [gx, gz, hx, hz] of [
+    for (const [gx, gz, gw, gd] of [
       [ix, iz + id / 2 + 0.35, 1.6, 0.22],
       [ix - iw / 2 - 0.35, iz, 0.22, 2.1],
     ]) {
-      this.props.scatterDebris('square', gx, gz, hx, hz, 16, { brickRatio: 0.55 });
+      this.props.scatterDebris('square', gx, gz, gw, gd, 16, { brickRatio: 0.55 });
     }
     this.props.grassLine('square', ix - iw / 2 - 0.2, iz - id / 2, ix - iw / 2 - 0.2, iz + id / 2, 14, 0.16);
     this.props.tyres('square', ix + 1.9, iz + 2.4, 3);

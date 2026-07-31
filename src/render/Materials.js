@@ -264,14 +264,30 @@ export const MATERIAL_RECIPES = {
   plaster_painted: {
     tile: 3,
     uvScale: 2.5,
-    normalScale: 0.5,
+    // 0.5 against a 0.55 bake strength was an eighth of the slope concrete
+    // carries, and the interior pose stands 1.5 m off this wall: measured over the
+    // baked field, 92% of texels came back under one degree of tilt, so the
+    // surface shaded as a painted card and the only high-frequency signal on it
+    // was the grade's grain. The correction is relief, not albedo — the two-tone
+    // history recorded below is still the binding constraint on colour.
+    normalScale: 0.78,
     macro: { scale: 0.045, albedo: 0.17, rough: 0.13, grime: 0.3, tint: 0x5c5347, patch: 0.13, patchFreq: 0.55, runs: 0.5, runFreq: 1.5 },
-    // Lower than the ground recipes: limewash over plaster is genuinely smooth,
-    // and what a close read wants back is the trowel stipple, not aggregate.
-    detail: { freq: 8, normal: 0.34, rough: 0.14, fade: 6 },
+    // Limewash over plaster is genuinely smooth, so what the near field wants back
+    // is the trowel stipple, not aggregate — but it wants it at a strength that
+    // survives being a metre and a half away.
+    detail: { freq: 8, normal: 0.5, rough: 0.18, fade: 6 },
     build(b) {
       const trowel = b.warp(b.fbm({ freq: 5, octaves: 4 }), { freq: 2, amount: b.size * 0.11 });
       const stipple = b.fbm({ freq: 40, octaves: 2, seed: 71 });
+      // The octave between the two. A skim coat is floated by hand and keeps the
+      // drag of the float at five centimetres or so; the sweep is too broad to make
+      // a gradient at a metre and the stipple is too fine to survive the mips, so
+      // neither of them was shading anything at the range this wall is seen from.
+      const drag = b.warp(b.fbm({ freq: 17, octaves: 3, gain: 0.55, seed: 1187 }), { freq: 9, amount: b.size * 0.014 });
+      // Blown air and knocked-out sand pinhole the substrate. The paint film
+      // bridges them, so they only exist where it has gone — which is most of why
+      // bare plaster reads friable and painted plaster reads sealed.
+      const pin = b.cells({ freq: 20, jitter: 1, mode: 'f1', seed: 3181 });
       // A torn paint edge is neither round nor smooth. A cell field gives round
       // blobs however hard it is warped, so the peel mask is a warped fBm pushed
       // through a tight threshold — irregular outline, ragged rim.
@@ -290,8 +306,10 @@ export const MATERIAL_RECIPES = {
       // camouflage: it was the loudest thing in the interior frame and it made
       // every facade in the establishing shot look mottled.
       const under = lin(0xa39a89);
-      b.normalStrength = 0.55;
-      b.aoRelief = 0.4;
+      b.normalStrength = 0.95;
+      // Raised with the peel step below: the horizon march is what puts the short
+      // shadow inside the patch, and at 0.4 it was marching over a 0.06 kerb.
+      b.aoRelief = 0.52;
       b.each((i) => {
         // Peeling is a hard-edged event: the paint film either is there or is
         // not, so the mask keeps its tight transition and the roughness jumps
@@ -304,13 +322,35 @@ export const MATERIAL_RECIPES = {
         // and narrow so only the ridge crest survives, and the regional gate keeps
         // whole stretches of wall intact.
         const crack = smoothstep(0.76, 0.94, cracks[i]) * smoothstep(0.46, 0.68, zone[i]);
-        b.height[i] = 0.58 + (trowel[i] - 0.5) * 0.14 + (stipple[i] - 0.5) * 0.05 - bare * 0.06 - crack * 0.22;
+        // What sells a peel is not the colour under it, it is the step at its
+        // edge. The film has thickness, the last few millimetres before the tear
+        // curl up off the substrate, and that lip is what catches a highlight and
+        // drops a short shadow into the patch. Skewed to the paint side (peak at
+        // a third) because the curl belongs to the film, not to the bare plaster.
+        const lip = bare * (1 - bare) * (1 - bare) * 6.75;
+        const pit = smoothstep(0.22, 0.03, pin[i]) * bare;
+        b.height[i] =
+          0.58 +
+          (trowel[i] - 0.5) * 0.15 +
+          (drag[i] - 0.5) * 0.15 +
+          (stipple[i] - 0.5) * 0.06 -
+          bare * 0.13 +
+          lip * 0.075 -
+          pit * 0.1 -
+          crack * 0.22;
         let c = mixc(paint, under, bare);
         c = mixc(c, lin(0x8a8271), crack * 0.75);
         b.rgb(i, ...c);
-        b.scale(i, 0.94 + trowel[i] * 0.12);
-        b.rough[i] = rgh((1 - bare) * (0.36 + stipple[i] * 0.1) + bare * 0.9 + crack * 0.2);
-        b.aoMul[i] = 1 - crack * 0.3 - bare * 0.08;
+        b.scale(i, 0.94 + trowel[i] * 0.1 + (drag[i] - 0.5) * 0.07 * bare);
+        // Three roughness populations rather than two flat ones, because a single
+        // 0.9 across a patch is what made the bare plaster read as a stain instead
+        // of a surface: the sealed film, the crests of the trowel sweep that
+        // shoulders and hands have burnished, and the friable substrate whose own
+        // sheen wanders with the float drag.
+        const film = 0.4 + stipple[i] * 0.1 - smoothstep(0.62, 0.95, trowel[i]) * 0.12;
+        const substrate = 0.86 + (drag[i] - 0.5) * 0.18 + pit * 0.08;
+        b.rough[i] = rgh(film + (substrate - film) * bare + crack * 0.2);
+        b.aoMul[i] = 1 - crack * 0.3 - bare * 0.08 - pit * 0.14;
       });
     },
   },

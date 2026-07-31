@@ -399,12 +399,19 @@ export class Props {
     const rng = this.rng;
     const base = new THREE.Matrix4().makeRotationY(ry).setPosition(x, this.y, z);
     const M = new THREE.Matrix4();
-    const SHEET = 'iron_painted_chipped';
+    // The density override is the answer to "wear that follows no panel line". At
+    // the level's default 2.2 the recipe's chip cells land every 8 cm, which on a
+    // 1.5 m panel four metres from the eye is eighteen evenly spaced dark discs —
+    // polka dots, and the only thing on the body loud enough to be read as its
+    // detail. Paint chips off a car at one to three centimetres. At 5 they land at
+    // 3.6 cm and become the speckle they should always have been, which leaves the
+    // chamfer wear as the only wear the eye can resolve as a shape.
+    const SHEET = 'iron_painted_chipped|x5';
     const STEEL = 'steel_rusted';
     // Retained paint on the flanks; oxide on everything the fire vented through;
     // soot in the cabin and behind the shut lines. One recipe, three substances.
     const col = paint(tint, 0.34, 1.05);
-    const oxide = paint(0xb4ac9c, 0.14, 2.15);
+    const oxide = paint(0xb4ac9c, 0.14, 2.5);
     const soot = paint(0x3b3730, 0.12, 0.42);
     const rust = paint(0x8c5730, 0.55, 1.15);
     const iron = paint(0xa9a49c, 0.18, 1.0);
@@ -472,19 +479,32 @@ export class Props {
     put(worn(k.chamfer(1.46, 0.07, 1.5, 0.03), 0.4), at(-0.04, 1.6, -0.5, 0.04, 0.11), oxide.clone().multiplyScalar(0.7));
     put(worn(k.chamfer(0.86, 0.06, 0.78, 0.03), 0.5), at(0.5, 1.44, 0.42, -0.1, 0.62), oxide.clone().multiplyScalar(0.82));
 
-    // Nose: grille recess, bars, lamp buckets, and the bumper irons front and
-    // rear — the only bare metal on the car, and the only specular event on it.
-    put(k.chamfer(1.56, 0.34, 0.12, 0.03), at(0, 0.72, 1.95), col.clone().multiplyScalar(0.94));
-    put(k.box(1.02, 0.24, 0.06, 0), at(0, 0.74, 1.9), soot.clone().multiplyScalar(0.6));
-    for (let b = 0; b < 3; b++) {
-      put(k.chamfer(1.0, 0.02, 0.03, 0.006), at(0, 0.66 + b * 0.08, 1.93), iron, STEEL);
+    // The nose, which is what the establishing camera is actually looking at: it
+    // sits 6.6 degrees off this car's centreline, so the flank is edge-on and the
+    // front is nearly the whole read. The grille is therefore a real aperture
+    // between four separate pressings rather than a recess behind a solid panel —
+    // a lamp bucket and a set of bars parked inside 12 cm of sheet are geometry
+    // nobody will ever see, which is exactly what the first pass built.
+    const NZ = 1.95;
+    put(worn(k.chamfer(1.58, 0.14, 0.13, 0.03), 0.5), at(0, 0.97, NZ - 0.02), col.clone().multiplyScalar(0.9));
+    put(worn(k.chamfer(1.58, 0.2, 0.13, 0.03), 0.5), at(0, 0.56, NZ), col.clone().multiplyScalar(0.84));
+    put(k.box(0.9, 0.24, 0.05, 0), at(0, 0.79, NZ - 0.07), soot.clone().multiplyScalar(0.45));
+    for (let b = 0; b < 4; b++) {
+      put(k.chamfer(0.86, 0.022, 0.04, 0.007), at(0, 0.7 + b * 0.06, NZ - 0.03), iron, STEEL);
     }
     for (const sx of [-1, 1]) {
-      put(k.cylinder(0.14, 0.15, 0.1, 8), at(sx * 0.56, 0.82, 1.93, Math.PI / 2), soot.clone().multiplyScalar(0.7));
+      put(worn(k.chamfer(0.36, 0.26, 0.13, 0.03), 0.5), at(sx * 0.6, 0.79, NZ), col.clone().multiplyScalar(0.96));
+      put(k.cylinder(0.135, 0.145, 0.07, 10), at(sx * 0.6, 0.79, NZ + 0.06, Math.PI / 2), soot.clone().multiplyScalar(0.55));
+      // One lamp still has its reflector. A 27 cm bright disc where a headlamp
+      // belongs is the cheapest "this is a road car" cue there is, and the wreck
+      // needs one because head-on it has no wheels and no profile to say it.
+      if (sx > 0) put(k.dome(0.115, 1.2, 10, 4), at(sx * 0.6, 0.79, NZ + 0.05, Math.PI / 2), iron, 'aluminium_scuffed');
     }
-    put(k.chamfer(1.68, 0.13, 0.11, 0.03), at(0, 0.54, 2.02), iron, STEEL);
+    // Number plate: the other one.
+    put(k.chamfer(0.44, 0.14, 0.02, 0.005), at(-0.03, 0.6, NZ + 0.075), paint(0xd8d2c2, 0.06, 2.55));
+    put(k.chamfer(1.68, 0.13, 0.11, 0.03), at(0, 0.4, 2.03), iron.clone().multiplyScalar(0.85), STEEL);
     // The rear iron has come off one mount and hangs.
-    put(k.chamfer(1.6, 0.12, 0.11, 0.03), at(0.1, 0.42, -2.02, 0.14, 0.34), iron, STEEL);
+    put(k.chamfer(1.6, 0.12, 0.11, 0.03), at(0.1, 0.42, -2.02, 0.14, 0.34), iron.clone().multiplyScalar(0.85), STEEL);
     put(k.cylinder(0.036, 0.042, 0.55, 6), at(0.48, 0.28, -1.86, Math.PI / 2), iron, STEEL);
 
     // Wheels: two burnt to the rim, two deflated. Outboard of the rocker and

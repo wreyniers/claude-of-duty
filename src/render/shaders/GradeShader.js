@@ -34,7 +34,13 @@ export const GRADE_PRESETS = {
     shadowTint: [0.855, 0.94, 1.15], // sky bounce: the cool half of teal-orange
     highTint: [1.075, 1.0, 0.925], // sun: the warm half
     split: [0.42, 0.32],
-    lift: [0.004, 0.007, 0.016], // blue lift keeps blacks from reading as dead
+    // A print black, not a fill light. At the old [0.004, 0.007, 0.016] every
+    // world pixel bottomed out at display (6, 13, 28) — a floor bluer than the
+    // sunlit ground was warm, standing in for sky bounce the lighting was not
+    // casting. Now that the fill tints the shade physically, this only has to
+    // stop the toe reading as a hole, and a third of the old value does that
+    // while leaving the shadow's colour to the scene.
+    lift: [0.001, 0.002, 0.005],
     gamma: [1.0, 1.0, 1.0],
     gain: [1.0, 0.997, 0.986],
     vignette: 1.0, // scales settings.vignette
@@ -82,6 +88,11 @@ export const GradeShader = {
     uTexel: { value: null }, // set by PostFX to a shared Vector2
     uTime: { value: 0 },
 
+    // The view model, scene-referred, with coverage in alpha. It is composited
+    // here rather than over the finished frame so the weapon shares the frame's
+    // tone curve, black point and lens character instead of being pasted onto it.
+    tViewmodel: { value: null },
+
     // Light shafts arrive as radiance, not as a layer: PostFX hands over the
     // accumulated sun-occlusion buffer and this pass adds it in before exposure
     // so it goes through the tone curve with everything else.
@@ -126,6 +137,7 @@ void main() {
 varying vec2 vUv;
 
 uniform sampler2D tDiffuse;
+uniform sampler2D tViewmodel;
 uniform vec2 uTexel;
 uniform float uTime;
 
@@ -192,13 +204,30 @@ vec3 toSRGB( vec3 c ) {
 }
 
 /**
+ * The radiance this pass grades: the world, plus whatever in-scattered sunlight
+ * the eye ray crossed, with the view model over the top.
+ *
+ * The view model target is rendered with ordinary alpha blending over a cleared
+ * buffer, so its colour arrives already multiplied by its own coverage — the
+ * composite is an add, not a mix, or a pane of optic glass would be attenuated
+ * twice. Coverage also removes the airlight: the shaft term is derived from the
+ * *world* depth behind the pixel, and a weapon 30 cm from the eye has none of
+ * that air in front of it.
+ */
+vec3 sceneAt( vec2 uv, vec3 inscatter ) {
+	vec4 vm = texture2D( tViewmodel, uv );
+	vec3 world = max( texture2D( tDiffuse, uv ).rgb, 0.0 ) + inscatter;
+	return world * ( 1.0 - clamp( vm.a, 0.0, 1.0 ) ) + max( vm.rgb, 0.0 );
+}
+
+/**
  * The whole tone + grade evaluated for one source sample. It is a function
  * rather than inline code because chromatic aberration has to run *after* the
  * grade, and in a single pass that means grading three separately offset samples
  * and keeping one channel from each.
  */
 vec3 gradeAt( vec2 uv, vec3 inscatter ) {
-	vec3 c = ( max( texture2D( tDiffuse, uv ).rgb, 0.0 ) + inscatter ) * uExposure;
+	vec3 c = sceneAt( uv, inscatter ) * uExposure;
 
 	// Split toning before the curve, so the tint rides the scene's own falloff
 	// instead of sitting on top of the print as a flat wash.
@@ -226,9 +255,14 @@ vec3 gradeAt( vec2 uv, vec3 inscatter ) {
 	return pow( max( c, 1e-5 ), uGamma );
 }
 
-/** Display-referred luminance of a source sample; feeds the unsharp mask only. */
+/**
+ * Display-referred luminance of a source sample; feeds the unsharp mask only.
+ * It reads the composite rather than the world alone, because a mask built from
+ * what is *behind* the weapon would sharpen the weapon along the background's
+ * edges — a halo with nothing under it.
+ */
 float displayLuma( vec2 uv ) {
-	float l = max( luma( texture2D( tDiffuse, uv ).rgb ), 0.0 ) * uExposure;
+	float l = max( luma( sceneAt( uv, vec3( 0.0 ) ) ), 0.0 ) * uExposure;
 	return clamp( rrtOdt( l ), 0.0, 1.0 );
 }
 
@@ -257,13 +291,17 @@ void main() {
 
 	vec3 col = gradeAt( vUv, shaft );
 
-	// Radial chromatic aberration, strictly outside the central 70% of the
-	// radius: real lenses are corrected on axis, and CA over the whole frame is
-	// the single most obvious sign of post applied by feel rather than by optics.
-	float caW = smoothstep( 0.72, 1.36, rn ) * uCA;
+	// Radial chromatic aberration, confined to the corners: real lenses are
+	// corrected on axis, and CA over the whole frame is the single most obvious
+	// sign of post applied by feel rather than by optics. The old 0.72 gate put
+	// 60% of full strength on the edge midpoints, which at 960 wide is a 1.7 px
+	// red/blue split on a window reveal sitting nowhere near a corner. rn is 1.0
+	// at those midpoints and 1.414 in the corners, so the ramp has to start above
+	// 1.0 to mean "corner" at all; the offset then stays sub-pixel until it does.
+	float caW = smoothstep( 0.95, 1.45, rn ) * uCA;
 	if ( caW > 0.002 ) {
 		vec2 dir = fromCentre / max( length( fromCentre ), 1e-5 );
-		vec2 off = dir * caW * 0.0019;
+		vec2 off = dir * caW * 0.0016;
 		col.r = gradeAt( vUv + off, shaft ).r;
 		col.b = gradeAt( vUv - off, shaft ).b;
 	}

@@ -36,6 +36,7 @@ import { MotionBlurShader, VELOCITY_GLSL } from './shaders/MotionBlurShader.js';
  *   motion blur     camera velocity from depth + last frame's view-projection
  *   bloom           high threshold, five mips, low intensity
  *   light shafts    reduced-res sun occlusion, added back inside the grade
+ *   view model      its own HDR target with coverage, composited by the grade
  *   grade           ACES RRT+ODT, grading, CA, vignette, grain, sharpen, sRGB
  *   SMAA            morphological AA on the finished LDR frame
  *
@@ -494,6 +495,75 @@ class ScenePass extends Pass {
   }
 }
 
+/**
+ * The view model, rendered into an HDR target of its own so the grade can put it
+ * through the same curve as everything else.
+ *
+ * Engine draws `viewmodelScene` after the composer has finished, into a buffer
+ * that is already tone-mapped and sRGB-encoded. That is one frame with two black
+ * points and two anti-aliasing regimes: the world bottoms out on the grade's lift
+ * and is resolved by SMAA, while the weapon reaches absolute zero and keeps every
+ * jaggy, and the optic's emitter — authored at 2.6x over a red primary — clips a
+ * single channel instead of desaturating up the ACES shoulder. Nothing tuned in
+ * the grade can reach it, because it is composited after the grade runs.
+ *
+ * So the weapon is drawn here instead, scene-referred, and handed to the grade as
+ * a texture. It is deliberately placed after TAA, motion blur and AO: those three
+ * all reason about the world depth buffer, and the view model camera has its own
+ * projection and an 8 mm near plane, so every one of them would be answering with
+ * the depth of whatever the weapon happens to be standing in front of.
+ *
+ * Coverage travels in alpha, which means the target has to clear transparent. The
+ * renderer's own clear alpha is 1, not 0, because the canvas was created without
+ * an alpha channel — a detail that silently turns the mask into "everywhere".
+ */
+class ViewModelPass extends Pass {
+  constructor(game, width, height) {
+    super();
+    this.needsSwap = false;
+    this.game = game;
+
+    this.target = new THREE.WebGLRenderTarget(width, height, {
+      type: THREE.HalfFloatType,
+      colorSpace: THREE.LinearSRGBColorSpace,
+      depthBuffer: true, // the rig self-occludes; there is no other depth for it
+      stencilBuffer: false,
+      samples: 0,
+    });
+    this.target.texture.name = 'PostFX.viewmodel';
+  }
+
+  render(renderer) {
+    const scene = this.game.viewmodelScene;
+    const camera = this.game.engine?.viewmodelCamera;
+    if (!scene || !camera) return;
+
+    const alpha = renderer.getClearAlpha();
+    const autoClear = renderer.autoClear;
+    renderer.setClearAlpha(0);
+    renderer.autoClear = true;
+    scene.visible = true;
+    renderer.setRenderTarget(this.target);
+    renderer.render(scene, camera);
+    // Engine unconditionally draws this scene again once the composer returns, and
+    // that draw is the ungraded one. Leaving the root hidden is what makes it a
+    // no-op — an empty render list — without this module reaching into Engine.
+    scene.visible = false;
+    renderer.setClearAlpha(alpha);
+    renderer.autoClear = autoClear;
+  }
+
+  setSize(width, height) {
+    this.target.setSize(width, height);
+  }
+
+  dispose() {
+    // The chain can be torn down with the scene still hidden from the draw above.
+    if (this.game.viewmodelScene) this.game.viewmodelScene.visible = true;
+    this.target.dispose();
+  }
+}
+
 /** TAA resolve plus its history ping-pong. */
 class TemporalAAPass extends Pass {
   constructor(width, height) {
@@ -727,6 +797,7 @@ export class PostFX {
     this.motionBlur = null;
     this.bloom = null;
     this.shafts = null;
+    this.viewmodel = null;
     this.gradePass = null;
     this.smaa = null;
 
@@ -983,10 +1054,15 @@ export class PostFX {
       this.composer.addPass(shafts);
     }
 
+    const viewmodel = new ViewModelPass(this.game, w, h);
+    this.viewmodel = viewmodel;
+    this.composer.addPass(viewmodel);
+
     const grade = new ShaderPass(GradeShader);
     grade.material.depthTest = false;
     grade.material.depthWrite = false;
     grade.uniforms.uTexel.value = this._texel;
+    grade.uniforms.tViewmodel.value = viewmodel.target.texture;
     grade.uniforms.tShaft.value = this.shafts ? this.shafts.target.texture : null;
     grade.uniforms.tDepth.value = this.depthTexture;
     grade.uniforms.uCamPlanes.value = this._camPlanes;
@@ -1223,7 +1299,8 @@ export class PostFX {
     this._prevCamQuat.copy(camera.quaternion);
     this._hasPrev = true;
 
-    // Leave the renderer where Engine expects it for the view model pass.
+    // Engine still issues its own view model draw after this returns; ViewModelPass
+    // has already emptied it, but it is issued against whatever target is bound.
     renderer.setRenderTarget(null);
   }
 
@@ -1281,6 +1358,7 @@ export class PostFX {
     this.motionBlur = null;
     this.bloom = null;
     this.shafts = null;
+    this.viewmodel = null;
     this.gradePass = null;
     this.smaa = null;
   }

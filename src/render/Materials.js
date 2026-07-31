@@ -1099,8 +1099,14 @@ export const MATERIAL_RECIPES = {
       const stip = b.cells({ freq: 40, mode: 'dome', jitter: 1, seed: 4 });
       const flow = b.fbm({ freq: 9, octaves: 4, seed: 66 });
       const wear = b.fbm({ freq: 3, octaves: 3, seed: 21 });
-      const poly = lin(0x333436);
-      const warm = lin(0x413a30);
+      // A dielectric a couple of levels up from the metals, and warmer than them.
+      // The three gun recipes were 0x33, 0x20 and 0x15 with an ACES toe under all
+      // of them, which put receiver, handguard and stock inside four output levels
+      // of each other — the rubric's "one uniform material for the whole weapon"
+      // arrived by way of the tone curve rather than the maps. Glass-filled nylon
+      // really is browner and lighter than anodising, so the separation is free.
+      const poly = lin(0x413f3a);
+      const warm = lin(0x4d4436);
       b.normalStrength = 0.9;
       b.aoRelief = 0.45;
       b.each((i) => {
@@ -1155,7 +1161,11 @@ export const MATERIAL_RECIPES = {
       const blast = b.fbm({ freq: 40, octaves: 2 });
       const edge = b.fbm({ freq: 5, octaves: 4, seed: 91 });
       const rail = b.fbm({ freq: 60, freqY: 6, octaves: 2, seed: 7 });
-      const anod = lin(0x202224);
+      // Type III anodising is a hard grey oxide, and against blued steel it is
+      // visibly the lighter of the two — which is the one value step separating a
+      // rail from the barrel under it. At 0x20 that step was under two levels out
+      // of the tone curve and the whole upper receiver read as one part.
+      const anod = lin(0x2e3134);
       const alu = lin(0xb9bdc1);
       b.normalStrength = 0.4;
       b.aoRelief = 0.2;
@@ -1227,8 +1237,11 @@ export const MATERIAL_RECIPES = {
       b.normalStrength = 0.85;
       // Skin has no hard edge for a horizon march to catch — the creases are the
       // only occluders and they are shallow — so a relief much over a third puts
-      // more AO on a hand than the sun ever takes off it.
+      // more AO on a hand than the sun ever takes off it, and at the density this
+      // network runs the full-strength march comes back as grime rather than as
+      // shading.
       b.aoRelief = 0.4;
+      b.aoStrength = 0.6;
       b.each((i) => {
         const pore = smoothstep(0.16, 0.03, pores[i]);
         const crease = smoothstep(0.72, 0.95, creases[i]);

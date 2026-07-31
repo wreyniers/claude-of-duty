@@ -24,7 +24,16 @@ import { clamp01, smoothstep } from './Noise.js';
  *   physical    use MeshPhysicalMaterial (cloth sheen, glass)
  *   mat         extra material parameters
  *   macro       world-space large-scale variation (false disables)
+ *   detail      near-field second normal/roughness layer at N x the base UV
+ *   heal        world-space gate for the damage this recipe writes to b.damage
+ *   dust        strength of the up-facing dust film (false disables)
+ *   translucency thin-surface transmission for a sheet the sun gets through
  *   build(b)    paint the fields
+ *
+ * The last four are all world-space: they are things about a surface that a
+ * tiling texture cannot know — which way this face points, how close the camera
+ * is, whether *this* stretch of wall is the damaged one. They are declared here
+ * and applied by the macro shader in AssetForge; a recipe only says how much.
  */
 
 const fr = (x) => x - Math.floor(x);
@@ -90,6 +99,11 @@ export const MATERIAL_RECIPES = {
     uvScale: 3,
     normalScale: 0.85,
     macro: { scale: 0.062, albedo: 0.2, rough: 0.17, grime: 0.26, patch: 0.14, patchFreq: 0.32, runs: 0.42, runFreq: 1.2 },
+    // The single largest surface in the frame and the one the camera stands on, so
+    // it is the surface that most needs something under a one-metre read: at
+    // 2.5 m a tile the base map is about a centimetre a texel, which is five
+    // screen pixels of the same value at knee height.
+    detail: { freq: 9, normal: 0.5, rough: 0.2, fade: 7 },
     build(b) {
       // gain above 0.5 deliberately: a mathematically clean fBm spectrum reads as
       // soft cloud at texture scale, and cement grain is not soft.
@@ -149,27 +163,44 @@ export const MATERIAL_RECIPES = {
     uvScale: 3,
     normalScale: 1.5,
     macro: { scale: 0.06, albedo: 0.17, rough: 0.15, grime: 0.3, patch: 0.14, patchFreq: 0.3, runs: 0.45, runFreq: 1.3 },
+    detail: { freq: 9, normal: 0.55, rough: 0.24, fade: 7 },
+    // Every mask in a tiling texture tiles, including the one that exists to make
+    // the damage regional — so at 2.5 m a tile the "regional" gate repeated twice
+    // across a 4 m pedestal and painted the identical crack network on all of it.
+    // The bake now writes what is damage into b.damage and the world-space gate
+    // decides where damage happens at all, which is the only place that decision
+    // can be made without a seam.
+    heal: { amount: 0.92, threshold: 0.46, rough: 0.66, tint: 0x8b8880, normal: 0.85 },
     build(b) {
       const spall = b.cells({ freq: 13, jitter: 1, mode: 'f1', seed: 21 });
       const spallId = b.cells({ freq: 13, jitter: 1, mode: 'id', seed: 21 });
       const cracks = b.warp(b.cells({ freq: 8, mode: 'edge', seed: 88 }), { freq: 4, amount: b.size * 0.035 });
       const grain = b.fbm({ freq: 16, octaves: 6, gain: 0.6, seed: 5 });
       const agg = b.cells({ freq: 34, mode: 'id', seed: 1301 });
-      // A cellular network left unmasked covers the whole surface and the result
-      // reads as dried mud or crazy paving. Real crack damage is regional, so the
-      // network is gated by a low-frequency mask and only propagates in patches.
-      const region = b.fbm({ freq: 3, octaves: 3, seed: 1777 });
+      const region = b.fbm({ freq: 1.7, octaves: 3, seed: 1777 });
       const face = lin(0x8b8880);
       const core = lin(0x9d968a);
       const dark = lin(0x3a3732);
       b.normalStrength = 1.3;
       b.aoRelief = 0.65;
-      // Only some cells have spalled, and the crack network is a hairline, not a
-      // channel — the difference between pitted concrete and crazy paving.
-      const craterAt = (i) => (spallId[i] > 0.52 ? smoothstep(0.3, 0.05, spall[i]) : 0);
-      const crackAt = (i) => smoothstep(0.07, 0.006, cracks[i]) * smoothstep(0.42, 0.62, region[i]);
+      /**
+       * A spall is a conchoidal fracture: the cement skin lets go along a plane and
+       * leaves a shallow floor behind a near-vertical wall. The wall is the whole
+       * read — it is the only thing that gives the pit a lit side and a shadowed
+       * one, and a pit shaded from a soft bowl instead is a flat grey disc however
+       * deep it is. So the transition band is under a third of the radius, and the
+       * radius comes off the cell id: identically sized pits on an even lattice is
+       * the other half of what made this read as crazy paving.
+       */
+      const craterAt = (i) => {
+        const id = spallId[i];
+        if (id < 0.58) return 0;
+        const rad = 0.13 + (id - 0.58) * 0.62;
+        return smoothstep(rad, rad * 0.72, spall[i]);
+      };
+      const crackAt = (i) => smoothstep(0.055, 0.006, cracks[i]) * smoothstep(0.5, 0.72, region[i]);
       b.each((i) => {
-        b.height[i] = 0.72 + (grain[i] - 0.5) * 0.22 - craterAt(i) * 0.6 - crackAt(i) * 0.3;
+        b.height[i] = 0.72 + (grain[i] - 0.5) * 0.22 - craterAt(i) * 0.62 - crackAt(i) * 0.3;
       });
       // Curvature separates the crater rims from their floors; the rim is where
       // the cement skin broke away and the aggregate is proud and sharp.
@@ -186,6 +217,7 @@ export const MATERIAL_RECIPES = {
         b.scale(i, 0.82 + grain[i] * 0.36);
         b.rough[i] = rgh(0.6 + crater * 0.32 + crack * 0.3 + rim * 0.16 - smoothstep(0.5, 1, grain[i]) * 0.14);
         b.aoMul[i] = 1 - crater * 0.32 - crack * 0.4;
+        b.damage[i] = clamp01(crater * 0.95 + crack);
       });
     },
   },
@@ -234,6 +266,9 @@ export const MATERIAL_RECIPES = {
     uvScale: 2.5,
     normalScale: 0.5,
     macro: { scale: 0.045, albedo: 0.17, rough: 0.13, grime: 0.3, tint: 0x5c5347, patch: 0.13, patchFreq: 0.55, runs: 0.5, runFreq: 1.5 },
+    // Lower than the ground recipes: limewash over plaster is genuinely smooth,
+    // and what a close read wants back is the trowel stipple, not aggregate.
+    detail: { freq: 8, normal: 0.34, rough: 0.14, fade: 6 },
     build(b) {
       const trowel = b.warp(b.fbm({ freq: 5, octaves: 4 }), { freq: 2, amount: b.size * 0.11 });
       const stipple = b.fbm({ freq: 40, octaves: 2, seed: 71 });
@@ -285,6 +320,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 2,
     normalScale: 0.9,
     macro: { scale: 0.08, albedo: 0.09, rough: 0.06, grime: 0.34, tint: 0x4f4a3d, patch: 0.12, patchFreq: 0.7, runs: 0.34 },
+    dust: { rough: 0.3, metal: 0.2 },
     mat: { envMapIntensity: 1.25 },
     build(b) {
       const craze = b.ridge({ freq: 26, octaves: 3, seed: 55 });
@@ -325,6 +361,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 3,
     normalScale: 1.15,
     macro: { scale: 0.04, albedo: 0.18, rough: 0.18, grime: 0.16, tint: 0x6a6558, patch: 0.17, patchFreq: 0.26, runs: 0.2 },
+    detail: { freq: 10, normal: 0.5, rough: 0.2, fade: 7 },
     build(b) {
       const aggId = b.cells({ freq: 30, mode: 'id', seed: 3 });
       const aggH = b.cells({ freq: 30, mode: 'dome', jitter: 1, seed: 3 });
@@ -358,6 +395,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 3,
     normalScale: 1.0,
     macro: { scale: 0.05, albedo: 0.18, rough: 0.1, grime: 0.1, patch: 0.17, patchFreq: 0.3, runs: 0.15 },
+    detail: { freq: 9, normal: 0.45, rough: 0.18, fade: 6 },
     build(b) {
       const clods = b.cells({ freq: 15, mode: 'dome', jitter: 1, seed: 7 });
       const grit = b.fbm({ freq: 30, octaves: 3, seed: 8 });
@@ -390,6 +428,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 3,
     normalScale: 1.7,
     macro: { scale: 0.06, albedo: 0.14, rough: 0.08, grime: 0.12, patch: 0.17, patchFreq: 0.8, runs: 0.32, runFreq: 1.9 },
+    detail: { freq: 8, normal: 0.4, rough: 0.16, fade: 5 },
     build(b) {
       const dome = b.cells({ freq: 13, mode: 'dome', jitter: 1, seed: 31 });
       const sid = b.cells({ freq: 13, mode: 'id', jitter: 1, seed: 31 });
@@ -422,6 +461,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 4,
     normalScale: 0.8,
     macro: { scale: 0.07, albedo: 0.11, rough: 0.07, grime: 0.06, patch: 0.14, patchFreq: 0.22, runs: 0.1 },
+    detail: { freq: 12, normal: 0.35, rough: 0.12, fade: 5 },
     build(b) {
       const drift = b.fbm({ freq: 3, octaves: 4, seed: 19 });
       const grain = b.fbm({ freq: 48, octaves: 2, seed: 23 });
@@ -454,6 +494,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 2,
     normalScale: 0.4,
     macro: { scale: 0.09, albedo: 0.07, rough: 0.1, grime: 0.14, patch: 0.06, patchFreq: 0.9, runs: 0.16 },
+    dust: { rough: 0.34, metal: 0.5 },
     mat: { envMapIntensity: 1.5 },
     build(b) {
       // Brushing is anisotropic by definition: the same field sampled ~40:1
@@ -488,6 +529,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 2.5,
     normalScale: 1.4,
     macro: { scale: 0.055, albedo: 0.15, rough: 0.1, grime: 0.2, tint: 0x5a3a24, patch: 0.15, patchFreq: 0.85, runs: 0.42, runFreq: 2.1 },
+    dust: { rough: 0.34, metal: 0.5 },
     mat: { envMapIntensity: 1.35 },
     build(b) {
       const bloom = b.warp(b.fbm({ freq: 4, octaves: 5, seed: 3 }), { freq: 2, amount: b.size * 0.07 });
@@ -530,6 +572,9 @@ export const MATERIAL_RECIPES = {
     uvScale: 2.5,
     normalScale: 1.0,
     macro: { scale: 0.07, albedo: 0.12, rough: 0.1, grime: 0.2, patch: 0.12, patchFreq: 0.9, runs: 0.34, runFreq: 2.2 },
+    // A gloss coat that faces the sky is the one place a dust film changes the
+    // read completely: without it the horizontal faces mirror the zenith.
+    dust: { rough: 0.42, metal: 0.55 },
     // Industrial enamel over steel is a gloss coat, and the env map is where its
     // highlight comes from. Without this the top rail of a balcony railing has no
     // specular event anywhere along its run.
@@ -579,6 +624,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 2,
     normalScale: 0.45,
     macro: { scale: 0.1, albedo: 0.06, rough: 0.12, grime: 0.12, patch: 0.05, patchFreq: 1.0, runs: 0.14 },
+    dust: { rough: 0.3, metal: 0.45 },
     mat: { envMapIntensity: 1.5 },
     build(b) {
       const swirl = b.warp(b.fbm({ freq: 4, freqY: 48, octaves: 3 }), { freq: 5, amount: b.size * 0.05 });
@@ -604,6 +650,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 2,
     normalScale: 1.1,
     macro: { scale: 0.06, albedo: 0.12, rough: 0.1, grime: 0.22, tint: 0x6a4a2c, patch: 0.14, patchFreq: 0.75, runs: 0.5, runFreq: 2.4 },
+    dust: { rough: 0.36, metal: 0.5 },
     build(b) {
       const spangle = b.cells({ freq: 22, mode: 'id', seed: 12 });
       const rustF = b.fbm({ freq: 13, freqY: 3, octaves: 4, seed: 88 });
@@ -800,6 +847,15 @@ export const MATERIAL_RECIPES = {
     physical: true,
     mat: { sheen: 0.3, sheenRoughness: 0.7, sheenColor: new THREE.Color(0xa8a487) },
     macro: { scale: 0.16, albedo: 0.1, rough: 0.07, grime: 0.18, tint: 0x5b5540, patch: 0.1, patchFreq: 1.4, runs: 0.18 },
+    // Cotton duck at awning weight passes something like a quarter of what lands on
+    // it. This recipe is every sheet in the level — awnings, laundry, stall skirts —
+    // and a sheet is nearly always seen from the side the sun is not on, so the
+    // transmitted term is most of what the material is for. Not `transmission` on the
+    // physical material: that costs a full-scene refraction pass, and a thin opaque
+    // weave scatters rather than refracts anyway.
+    translucency: { amount: 0.3, wrap: 0.25 },
+    // A tarp is slack cloth, not a shelf, and it holds no dust worth modelling.
+    dust: false,
     build(b) {
       const blob = b.warp(b.fbm({ freq: 3, octaves: 4 }), { freq: 4, amount: b.size * 0.06 });
       const blob2 = b.warp(b.fbm({ freq: 5, octaves: 4, seed: 44 }), { freq: 3, amount: b.size * 0.05 });
@@ -836,19 +892,31 @@ export const MATERIAL_RECIPES = {
     tile: 1,
     uvScale: 4,
     normalScale: 1.2,
+    physical: true,
+    // Rubber is the textbook rough dielectric, and a rough dielectric with no
+    // retroreflective term is indistinguishable from matte black plastic. A broad,
+    // weak sheen is what puts the dull grazing-angle sit-up back on it.
+    mat: { sheen: 0.22, sheenRoughness: 0.9, sheenColor: new THREE.Color(0x8e8c88) },
     macro: { scale: 0.2, albedo: 0.08, rough: 0.09, grime: 0.16, patch: 0.08, patchFreq: 1.6, runs: 0.12 },
     build(b) {
       const micro = b.fbm({ freq: 46, octaves: 2 });
       const bloom = b.fbm({ freq: 9, octaves: 4, seed: 39 });
-      const black = lin(0x1b1c1d);
-      const grey = lin(0x3a3b39);
+      // 0.038 linear, not the 0.010 this was. Carbon-black rubber is the darkest
+      // common material on a street and it is still three to five percent — at one
+      // percent a tyre has no albedo left for the sky fill to land on and renders as
+      // a hole in the frame with the grade's blue lift showing through it.
+      const black = lin(0x37383a);
+      const grey = lin(0x5c5d5a);
       b.normalStrength = 1.1;
       b.aoRelief = 0.5;
       b.each((i, u, v) => {
-        // Moulded diamond tread: two crossed triangle waves, hard shoulders.
-        const a = tri((u + v) * 7);
-        const c2 = tri((u - v) * 7);
-        const lug = smoothstep(0.22, 0.42, Math.min(a, c2));
+        // Moulded diamond tread: two crossed triangle waves, hard shoulders. Half
+        // the frequency it was, with a narrower groove: at the old pitch the grooves
+        // met before the blocks had any width and the tread read as a wireframe
+        // crosshatch laid over the tyre rather than as moulded blocks.
+        const a = tri((u + v) * 3.5);
+        const c2 = tri((u - v) * 3.5);
+        const lug = smoothstep(0.12, 0.3, Math.min(a, c2));
         b.height[i] = 0.28 + lug * 0.55 + (micro[i] - 0.5) * 0.08;
         // Antiozonant bloom: the grey haze that migrates out of old rubber.
         const haze = clamp01(bloom[i] * 1.4 - 0.55) * (1 - lug * 0.5);

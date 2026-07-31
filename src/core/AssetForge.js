@@ -5,7 +5,7 @@ import {
   fbmField,
   worleyField,
   horizonAOField,
-  sobelNormalRGBA,
+  normalMipChain,
   blurField,
   curvatureField,
   warpField,
@@ -382,7 +382,11 @@ export class AssetForge {
       // fireflies through the bloom threshold on any sub-pixel geometry.
       orm[o + 1] = Math.max(0.035, Math.min(1, b.rough[i])) * 255;
       orm[o + 2] = clamp01(b.metal[i]) * 255;
-      orm[o + 3] = 255;
+      // Spare channel, so it carries the damage mask: which texels are spall,
+      // crack or blast rather than intact surface. The macro shader gates that on
+      // a world-space field, which is the only way a tiling map can put damage in
+      // one place and not in the next tile along.
+      orm[o + 3] = clamp01(b.damage[i]) * 255;
       hbytes[i] = clamp01(height[i]) * 255;
     }
     this._heightBytes.set(name, hbytes);
@@ -393,21 +397,23 @@ export class AssetForge {
       true,
       uv
     );
+    // Normal and roughness mips are built together and by hand, because the pair
+    // has to agree: each level of the normal chain reports how much normal spread
+    // it averaged away and the roughness level of the same footprint is widened to
+    // match. Left to the driver the two are filtered independently and a distant
+    // surface keeps a mirror lobe it no longer has any facets for.
+    const chain = normalMipChain(height, size, b.normalStrength);
+    const normalTex = this._finishTexture(
+      new THREE.DataTexture(chain.mips[0].data, size, size, THREE.RGBAFormat, THREE.UnsignedByteType),
+      false,
+      uv,
+      chain.mips
+    );
     const ormTex = this._finishTexture(
       new THREE.DataTexture(orm, size, size, THREE.RGBAFormat, THREE.UnsignedByteType),
       false,
-      uv
-    );
-    const normalTex = this._finishTexture(
-      new THREE.DataTexture(
-        sobelNormalRGBA(height, size, b.normalStrength),
-        size,
-        size,
-        THREE.RGBAFormat,
-        THREE.UnsignedByteType
-      ),
-      false,
-      uv
+      uv,
+      ormMipChain(orm, size, chain.variance)
     );
     this._textures.set(`${name}.albedo`, mapTex);
     this._textures.set(`${name}.orm`, ormTex);
@@ -438,14 +444,14 @@ export class AssetForge {
     mat.name = name;
     mat.userData.forge = { name, tile: recipe.tile ?? 1, uvScale: uv, size };
 
-    if (recipe.macro !== false) this._patchMacro(mat, recipe.macro || {});
+    if (recipe.macro !== false) this._patchMacro(mat, recipe.macro || {}, recipe);
 
     this.stats.baked++;
     this.stats.perMaterial[name] = +(performance.now() - t0).toFixed(1);
     return mat;
   }
 
-  _finishTexture(t, srgb, uvScale) {
+  _finishTexture(t, srgb, uvScale, mips) {
     // The one line that has to be right: albedo is colour and must be decoded,
     // every other map is data and must not be. Getting this backwards is a
     // frame-wide gamma error that looks like "washed out" rather than a bug.
@@ -453,7 +459,10 @@ export class AssetForge {
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
     t.magFilter = THREE.LinearFilter;
     t.minFilter = THREE.LinearMipmapLinearFilter;
-    t.generateMipmaps = true;
+    // A supplied chain has to run all the way to 1x1 or the texture is
+    // incomplete at the far mips and samples black.
+    if (mips) t.mipmaps = mips;
+    t.generateMipmaps = !mips;
     t.anisotropy = this.anisotropy;
     t.repeat.set(uvScale, uvScale);
     t.needsUpdate = true;
@@ -487,8 +496,21 @@ export class AssetForge {
    * a procedural scene read as uniformly dirty rather than weathered. The splash
    * zone at the foot of a wall is deliberately not here: the level bakes that into
    * vertex colour at merge time, and doing it twice crushes every wall base.
+   *
+   * Three more world-space terms ride along, for the same reason — each is a fact
+   * about a surface that a texture tile cannot know:
+   *
+   * - **Dust film.** Which way the face points. Dust settles on whatever faces the
+   *   sky and it is a dielectric, so a horizontal surface loses gloss and metal.
+   * - **Damage gate.** Where the damage is. A baked spall mask repeats with the
+   *   tile and paints the identical crack network on every square metre; gating it
+   *   on a world field leaves one panel wrecked and its neighbour intact.
+   * - **Detail layer.** How close the camera is. The baked maps are authored at
+   *   about a centimetre a texel, so inside a couple of metres they are magnified
+   *   past their own resolution and the surface goes soft — the one place a
+   *   procedural material looks *worse* the closer you get to it.
    */
-  _patchMacro(mat, cfg) {
+  _patchMacro(mat, cfg, recipe = {}) {
     const scale = cfg.scale ?? 0.11;
     const albedoAmt = cfg.albedo ?? 0.13;
     const roughAmt = cfg.rough ?? 0.12;
@@ -498,11 +520,38 @@ export class AssetForge {
     const runsAmt = cfg.runs ?? 0.3;
     const runFreq = cfg.runFreq ?? 1.3;
     const tint = new THREE.Color(cfg.tint ?? 0x6b6152);
+    const dust = recipe.dust === false ? null : recipe.dust || {};
+    const detail = recipe.detail || null;
+    const heal = recipe.heal || null;
+    const thru = recipe.translucency || null;
 
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uMacro = { value: new THREE.Vector4(scale, albedoAmt, roughAmt, grime) };
       shader.uniforms.uMacro2 = { value: new THREE.Vector4(patchAmt, patchFreq, runsAmt, runFreq) };
       shader.uniforms.uMacroTint = { value: tint };
+      shader.uniforms.uDust = { value: new THREE.Vector2(dust ? dust.rough ?? 0.22 : 0, dust ? dust.metal ?? 0.3 : 0) };
+      if (detail) {
+        shader.uniforms.uDetail = {
+          value: new THREE.Vector4(detail.freq ?? 8, detail.normal ?? 0.5, detail.rough ?? 0.22, detail.fade ?? 7),
+        };
+      }
+      if (heal) {
+        shader.uniforms.uHeal = {
+          value: new THREE.Vector4(heal.amount ?? 0.85, heal.threshold ?? 0.44, heal.rough ?? 0.72, heal.normal ?? 0.8),
+        };
+        shader.uniforms.uHealTint = { value: new THREE.Color(heal.tint ?? 0x8b8880) };
+      }
+      if (thru) {
+        // The sun's own live objects, shared by reference, so the term follows a
+        // time-of-day change with no update hook on this material. Irradiance is a
+        // plain number and has to be sampled, so a sunrise leaves it a stop stale.
+        const sky = this.game.sky;
+        shader.uniforms.uBack = {
+          value: new THREE.Vector4((thru.amount ?? 0.25) * (sky?.sunIrradiance ?? 3.4), thru.wrap ?? 0.25, 0, 0),
+        };
+        shader.uniforms.uSunDir = { value: sky?.sunDirection ?? new THREE.Vector3(0.3, 0.9, 0.2) };
+        shader.uniforms.uSunTint = { value: sky?.sunColor ?? new THREE.Color(0xffe9c9) };
+      }
 
       shader.vertexShader = shader.vertexShader
         .replace('void main() {', 'varying vec3 vMacroPos;\nvarying vec3 vMacroNrm;\nvoid main() {')
@@ -528,6 +577,10 @@ varying vec3 vMacroNrm;
 uniform vec4 uMacro;
 uniform vec4 uMacro2;
 uniform vec3 uMacroTint;
+uniform vec2 uDust;
+${detail ? 'uniform vec4 uDetail;' : ''}
+${heal ? 'uniform vec4 uHeal;\nuniform vec3 uHealTint;' : ''}
+${thru ? 'uniform vec4 uBack;\nuniform vec3 uSunDir;\nuniform vec3 uSunTint;' : ''}
 float macroHash( vec3 p ) {
 	p = fract( p * 0.3183099 + vec3( 0.71, 0.113, 0.419 ) );
 	p *= 17.0;
@@ -562,21 +615,98 @@ void main() {`
 	// a region of the wall instead of being sprinkled evenly over all of it.
 	float macroWet = clamp( uMacro2.z * macroSide * smoothstep( 0.58, 0.93, macroRun ) * ( 1.2 - macroPatch * 0.7 ), 0.0, 1.0 );
 	float macroDirt = clamp( macroGrime + macroWet * 0.7, 0.0, 1.0 );
+	// Squared, so it is the genuinely horizontal faces that silt up and not every
+	// surface with a slight tilt to it.
+	float macroDust = macroUp * macroUp * ( 0.55 + 0.45 * macroN );
 	diffuseColor.rgb *= 1.0 + ( macroN - 0.5 ) * 2.0 * uMacro.y + ( macroPatch - 0.5 ) * 2.0 * uMacro2.x - macroWet * 0.3;
-	diffuseColor.rgb = mix( diffuseColor.rgb, diffuseColor.rgb * uMacroTint * 1.6, macroDirt );`
+	diffuseColor.rgb = mix( diffuseColor.rgb, diffuseColor.rgb * uMacroTint * 1.6, macroDirt );${
+    detail
+      ? `
+	// One tap, read here and used twice: for roughness below and for the detail
+	// normal further down. Branched rather than faded to nothing, because past the
+	// fade distance the tap is pure cost — its own frequency is far under a pixel
+	// there and the base map's mips already describe that scale correctly.
+	vec4 macroDtl = vec4( 0.5, 0.5, 1.0, 0.5 );
+	float macroDtlFade = 1.0 - smoothstep( uDetail.w * 0.45, uDetail.w, length( vViewPosition ) );
+	if ( macroDtlFade > 0.004 ) macroDtl = texture2D( normalMap, vNormalMapUv * uDetail.x );`
+      : ''
+  }`
         )
         .replace(
           '#include <roughnessmap_fragment>',
           `#include <roughnessmap_fragment>
-	roughnessFactor = clamp( roughnessFactor + ( macroN - 0.5 ) * 2.0 * uMacro.z + macroDirt * 0.28, 0.04, 1.0 );`
+	roughnessFactor = clamp( roughnessFactor + ( macroN - 0.5 ) * 2.0 * uMacro.z + macroDirt * 0.28
+		+ macroDust * uDust.x${detail ? ' + ( macroDtl.a - 0.5 ) * uDetail.z * macroDtlFade' : ''}, 0.04, 1.0 );${
+    heal
+      ? `
+	// The damage mask rides in the ORM alpha. Healing it back toward the intact face
+	// wherever the world field says this stretch of surface was spared is what turns
+	// a tiling crack network into a couple of damaged patches per wall — the mask
+	// itself cannot know, because it repeats along with everything else in the tile.
+	float macroHeal = 0.0;
+	#ifdef USE_ROUGHNESSMAP
+		macroHeal = texelRoughness.a * uHeal.x * ( 1.0 - smoothstep( uHeal.y, uHeal.y + 0.2, macroPatch ) );
+		diffuseColor.rgb = mix( diffuseColor.rgb, uHealTint * ( 0.82 + 0.36 * macroN ), macroHeal );
+		roughnessFactor = mix( roughnessFactor, uHeal.z, macroHeal );
+	#endif`
+      : ''
+  }`
+        )
+        .replace(
+          '#include <metalnessmap_fragment>',
+          `#include <metalnessmap_fragment>
+	// Settled dust is a dielectric film over the metal, not a tint on it: a drum lid
+	// or a flat sheet that keeps full metalness is a mirror aimed at the zenith, and
+	// it comes back as one blown blue patch — the loudest wrong thing on a prop.
+	metalnessFactor *= 1.0 - macroDust * uDust.y;`
         );
+
+      if (detail || heal) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <normal_fragment_maps>',
+          `#ifdef USE_NORMALMAP_TANGENTSPACE
+	vec3 mapN = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;${
+    detail
+      ? `
+	mapN.xy += ( macroDtl.xy - 0.5 ) * 2.0 * uDetail.y * macroDtlFade;`
+      : ''
+  }
+	mapN.xy *= normalScale${heal ? ' * ( 1.0 - macroHeal * uHeal.w )' : ''};
+	normal = normalize( tbn * mapN );
+#else
+	#include <normal_fragment_maps>
+#endif`
+        );
+      }
+
+      if (thru) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          'vec3 totalDiffuse = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse;',
+          `// Thin-surface transmission. A sunlit awning seen from below is one of the
+	// strongest warm bounce sources a street has, and fabric with no transmission
+	// term renders as a dark printed sheet however carefully its weave is authored.
+	// Light enters the lit face and leaves the other one, so the term is gated on the
+	// sun being on the far side of the sheet from the eye — which also gives the
+	// falloff across a sag, since the view term runs off toward the hem. World-space
+	// normal for the sun test because the shading normal here is in view space.
+	// Deliberately unshadowed: the sheet is the thing casting the shadow, and
+	// sampling the cascade again costs more than the term is worth.
+	float macroLit = clamp( ( dot( normalize( vMacroNrm ), uSunDir ) + uBack.y ) / ( 1.0 + uBack.y ), 0.0, 1.0 );
+	float macroThru = clamp( -dot( normal, geometryViewDir ), 0.0, 1.0 );
+	vec3 totalDiffuse = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse
+		+ diffuseColor.rgb * uSunTint * ( uBack.x * macroLit * macroThru );`
+        );
+      }
 
       mat.userData.macroUniforms = shader.uniforms;
     };
     // onBeforeCompile is not part of Three's program cache key, so a patched and
     // an unpatched material with identical parameters would share a program and
-    // one of them would be missing the varyings. This key keeps them apart.
-    mat.customProgramCacheKey = () => 'forge-macro-2';
+    // one of them would be missing the varyings. The key has to name which blocks
+    // were injected too, or two recipes with the same parameters and different
+    // injections would share whichever program compiled first.
+    const key = `forge-macro-3${detail ? 'd' : ''}${heal ? 'h' : ''}${thru ? 't' : ''}`;
+    mat.customProgramCacheKey = () => key;
   }
 
   /* ------------------------------------------------- generic small textures */
@@ -1150,6 +1280,9 @@ class Bake {
     this.metal = new Float32Array(this.n);
     this.aoMul = new Float32Array(this.n).fill(1);
     this.alpha = new Float32Array(this.n).fill(1);
+    // Where this texel is damage rather than surface. Only recipes whose damage is
+    // meant to be regional fill it; see the heal term in _patchMacro.
+    this.damage = new Float32Array(this.n);
 
     this.normalStrength = 1;
     this.aoRelief = 0.4;
@@ -1230,6 +1363,53 @@ class Bake {
     this.albedo[o + 1] *= k;
     this.albedo[o + 2] *= k;
   }
+}
+
+/**
+ * How much of the normal map's own variance is charged to roughness. A full
+ * Toksvig coupling (1.0) is right for a Gaussian NDF and visibly over-blurs GGX,
+ * because GGX already has the long tail Toksvig's Gaussian does not; a quarter of
+ * it removes the sub-pixel speckle and still leaves a distant railing a highlight.
+ */
+const TOKSVIG = 0.25;
+
+/**
+ * Box-filtered ORM mip chain with the roughness level widened by the normal
+ * variance the matching normal level averaged away.
+ *
+ * Roughness is not linear in anything, so the widening happens where lobes
+ * actually add: GGX alpha is roughness squared and two independent lobes combine
+ * in alpha squared. Doing it there is what makes the coupling a no-op on a surface
+ * that was already rougher than its own normal spread, and decisive on the smooth
+ * dark metal where the speckle lives.
+ */
+function ormMipChain(base, size, variance) {
+  const mips = [{ data: base, width: size, height: size }];
+  let src = base;
+  let res = size;
+  let level = 0;
+  while (res > 1) {
+    const half = res >> 1;
+    const dst = new Uint8Array(half * half * 4);
+    const varr = variance[++level];
+    for (let y = 0; y < half; y++) {
+      for (let x = 0; x < half; x++) {
+        const a = (y * 2 * res + x * 2) * 4;
+        const b = a + 4;
+        const c = a + res * 4;
+        const d = c + 4;
+        const o = (y * half + x) * 4;
+        for (let k = 0; k < 4; k++) dst[o + k] = (src[a + k] + src[b + k] + src[c + k] + src[d + k] + 2) >> 2;
+        const r = dst[o + 1] / 255;
+        const wide = Math.pow(r * r * r * r + TOKSVIG * varr[y * half + x], 0.25);
+        dst[o + 1] = Math.min(255, wide * 255);
+      }
+    }
+    mips.push({ data: dst, width: half, height: half });
+    src = dst;
+    res = half;
+  }
+  return mips;
 }
 
 const SRGB_LUT_N = 4096;

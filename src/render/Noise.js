@@ -630,11 +630,135 @@ export function blurField(src, size, radius = 2, passes = 2) {
 }
 
 /**
- * Sobel normal map from a height field, packed RGBA with the height in alpha.
+ * Sobel normals from a height field as unit vectors, xyz interleaved.
  *
  * Sobel (not a 2-tap difference) because the 3x3 kernel is noticeably less
- * jagged on the diagonal features that cellular noise produces, and the height
- * rides along in A so parallax/POM consumers do not need a second upload.
+ * jagged on the diagonal features that cellular noise produces.
+ */
+export function sobelNormals(height, size, strength = 1) {
+  const out = new Float32Array(size * size * 3);
+  const w = size;
+  for (let y = 0; y < size; y++) {
+    const ym = ((y - 1 + size) % size) * w;
+    const y0 = y * w;
+    const yp = ((y + 1) % size) * w;
+    for (let x = 0; x < size; x++) {
+      const xm = (x - 1 + size) % size;
+      const xp = (x + 1) % size;
+      const h00 = height[ym + xm];
+      const h10 = height[ym + x];
+      const h20 = height[ym + xp];
+      const h01 = height[y0 + xm];
+      const h21 = height[y0 + xp];
+      const h02 = height[yp + xm];
+      const h12 = height[yp + x];
+      const h22 = height[yp + xp];
+      const dx = h00 + 2 * h01 + h02 - (h20 + 2 * h21 + h22);
+      const dy = h00 + 2 * h10 + h20 - (h02 + 2 * h12 + h22);
+      // Scale by size so a given height amplitude reads the same at any map
+      // resolution: the gradient is per-texel, the surface slope is per-metre.
+      const nx = dx * strength * size * 0.002;
+      const ny = dy * strength * size * 0.002;
+      const inv = 1 / Math.sqrt(nx * nx + ny * ny + 1);
+      const o = (y0 + x) * 3;
+      out[o] = nx * inv;
+      out[o + 1] = ny * inv;
+      out[o + 2] = inv;
+    }
+  }
+  return out;
+}
+
+/** Pack unit normals + a height field into RGBA bytes, height in alpha. */
+function packNormalRGBA(nrm, height, size) {
+  const out = new Uint8Array(size * size * 4);
+  for (let i = 0; i < size * size; i++) {
+    const o3 = i * 3;
+    const x = nrm[o3];
+    const y = nrm[o3 + 1];
+    const z = nrm[o3 + 2];
+    // The chain averages unit normals, so anything below the top level arrives
+    // short; renormalise on the way out or the shader reads a flattened bump.
+    const inv = 1 / (Math.sqrt(x * x + y * y + z * z) || 1);
+    const o = i * 4;
+    out[o] = (x * inv * 0.5 + 0.5) * 255;
+    out[o + 1] = (y * inv * 0.5 + 0.5) * 255;
+    out[o + 2] = (z * inv * 0.5 + 0.5) * 255;
+    out[o + 3] = clamp01(height[i]) * 255;
+  }
+  return out;
+}
+
+/**
+ * The whole normal mip chain, plus how much normal *spread* each level hides.
+ *
+ * A GPU builds normal mips by averaging and renormalising, which throws the one
+ * number that mattered away: the length of the average. A surface whose normals
+ * cancel out over a texel footprint no longer has a mirror-sharp lobe at that
+ * scale — its microfacet distribution is genuinely wider — and a renderer that
+ * keeps the authored roughness anyway lights a distant rail as if every one of
+ * those sub-pixel facets still pointed the same way. That is where the bright
+ * single-pixel speckle on dark metal comes from: the specular lobe is narrower
+ * than the pixel it is being asked to cover.
+ *
+ * So the chain is built here from the unaveraged unit normals, and `variance`
+ * carries the Gaussian spread implied by the shortening (|avg n| = e^(-o^2/2))
+ * for the bake to fold into the roughness mip of the same level. This is
+ * Toksvig's normal-variance-to-gloss coupling, done per mip.
+ */
+export function normalMipChain(height, size, strength = 1) {
+  const mips = [];
+  const variance = [];
+  let res = size;
+  let nrm = sobelNormals(height, size, strength);
+  let hgt = height;
+  mips.push({ data: packNormalRGBA(nrm, hgt, res), width: res, height: res });
+  // Level 0 is the authored surface itself: nothing has been averaged away yet.
+  variance.push(new Float32Array(res * res));
+
+  while (res > 1) {
+    const half = res >> 1;
+    const nn = new Float32Array(half * half * 3);
+    const nh = new Float32Array(half * half);
+    const nv = new Float32Array(half * half);
+    for (let y = 0; y < half; y++) {
+      for (let x = 0; x < half; x++) {
+        const a = (y * 2 * res + x * 2) * 3;
+        const b = a + 3;
+        const c = a + res * 3;
+        const d = c + 3;
+        const sx = (nrm[a] + nrm[b] + nrm[c] + nrm[d]) * 0.25;
+        const sy = (nrm[a + 1] + nrm[b + 1] + nrm[c + 1] + nrm[d + 1]) * 0.25;
+        const sz = (nrm[a + 2] + nrm[b + 2] + nrm[c + 2] + nrm[d + 2]) * 0.25;
+        const o = (y * half + x) * 3;
+        // Kept unnormalised: the next level averages averages, which is the same
+        // as averaging the whole footprint, and the length has to survive for
+        // the variance to keep growing with the footprint.
+        nn[o] = sx;
+        nn[o + 1] = sy;
+        nn[o + 2] = sz;
+        const i2 = y * 2 * res + x * 2;
+        nh[y * half + x] = (hgt[i2] + hgt[i2 + 1] + hgt[i2 + res] + hgt[i2 + res + 1]) * 0.25;
+        // Floored at 0.4: past that the average says almost nothing about
+        // direction and -2 ln(len) runs away, which would drive a level to fully
+        // rough on a surface that is merely bumpy.
+        const len = Math.max(0.4, Math.sqrt(sx * sx + sy * sy + sz * sz));
+        nv[y * half + x] = -2 * Math.log(Math.min(1, len));
+      }
+    }
+    mips.push({ data: packNormalRGBA(nn, nh, half), width: half, height: half });
+    variance.push(nv);
+    nrm = nn;
+    hgt = nh;
+    res = half;
+  }
+  return { mips, variance };
+}
+
+/**
+ * Sobel normal map from a height field, packed RGBA with the height in alpha.
+ * Single level; the height rides in A so parallax/POM consumers do not need a
+ * second upload.
  */
 export function sobelNormalRGBA(height, size, strength = 1) {
   const out = new Uint8Array(size * size * 4);

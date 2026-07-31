@@ -59,6 +59,7 @@ import * as THREE from 'three';
 
 const D2R = Math.PI / 180;
 const LUMA_W = [0.2126, 0.7152, 0.0722];
+const WHITE = new THREE.Color(1, 1, 1);
 
 /** Rayleigh scattering at sea level for 680/550/450 nm, m^-1. */
 const TOTAL_RAYLEIGH = [5.804542996261093e-6, 1.3562911419845635e-5, 3.0265902468824876e-5];
@@ -188,15 +189,24 @@ const BASE_PARAMS = {
    * the aerial density and the cirrus sheet were both already pulled back from.
    *
    * 0.0067/m against a 7 m scale height is about 12% single-scatter at 30 m along
-   * a horizontal ray, which at the establishing shot's 41 degrees off the sun is a
-   * lift of roughly 0.006 in linear units: a fifth of a stop on open shade, two
-   * percent on a sunlit wall, and nothing at all on the cobbles under the eye.
+   * a horizontal ray. Measured on the establishing shot, that is +5.8 code values
+   * on the sunward third of the frame, +0.06 on the anti-sun third, +0.09 on the
+   * cobbles under the eye and exactly zero on the sky — a wedge, not a wash, which
+   * is the only shape this term is allowed to have.
    */
   dustDensity: 0.0067,
   dustHeight: 7,
   dustLobe: 3.0, // pow() stand-in for a large-particle forward phase function
-  dustScale: 1 / 40, // one patch tile per this many metres: street-sized plumes
-  dustLum: 0.05, // fraction of the sun's radiance a dust grain returns
+  dustScale: 1 / 32, // one patch tile per this many metres: street-sized plumes
+  dustLum: 0.065, // fraction of the sun's radiance a dust grain returns
+  /**
+   * How far the dust's own albedo is pulled back to white. Lifted grit is the
+   * ground in the air and carries the ground's colour, which is what separates a
+   * dust event from a grey one — at 1.0 the term is fog with a phase function. It
+   * is not pulled all the way to the ground tint either, because a mineral grain's
+   * single-scattering albedo is much flatter than its diffuse reflectance.
+   */
+  dustWhiten: 0.35,
   dustDrift: 0.5, // m/s, so the plumes crawl rather than shimmer
   fogDensity: 0.0042,
   stars: 0,
@@ -734,7 +744,7 @@ const AERIAL_FRAG_BODY = /* glsl */ `
 	float dPatch = dN.r * 0.5 + dN.g * 0.3 + dN.a * 0.2;
 	// Squared, so the field spends most of its area near empty and the plumes are
 	// events. A dust term with a flat histogram is a fog term with extra steps.
-	dPatch = 0.25 + 1.7 * dPatch * dPatch;
+	dPatch = 0.15 + 2.0 * dPatch * dPatch;
 	float dF = 1.0 - exp( -dOd * uAerialDust.x * dPatch );
 	gl_FragColor.rgb += uAerialDustCol * ( dF * pow( aCs, uAerialDust.z ) );
 }
@@ -1029,9 +1039,13 @@ export class Sky {
     a.uAerialSunTint.value.copy(u.uSunRadiance.value).multiplyScalar(0.22);
     a.uAerialParams.value.set(p.aerialDensity, 1 / p.aerialHeight, p.aerialGlow, p.aerialMax);
     a.uAerialDust.value.set(p.dustDensity, 1 / p.dustHeight, p.dustLobe, p.dustScale);
-    // Dust returns the sun's own radiance, so it dies with the sun instead of
-    // needing a separate night override.
-    a.uAerialDustCol.value.copy(u.uSunRadiance.value).multiplyScalar(p.dustLum);
+    // Dust returns the sun's own radiance through its own albedo, so it dies with
+    // the sun instead of needing a separate night override, and it stays the
+    // colour of the street it came off rather than the colour of the sky.
+    this._tmpColor.copy(u.uGround.value);
+    const gmx = Math.max(this._tmpColor.r, this._tmpColor.g, this._tmpColor.b, 1e-5);
+    this._tmpColor.multiplyScalar(1 / gmx).lerp(WHITE, p.dustWhiten);
+    a.uAerialDustCol.value.copy(u.uSunRadiance.value).multiply(this._tmpColor).multiplyScalar(p.dustLum);
     this._dustDirX = Math.sin(wd);
     this._dustDirZ = Math.cos(wd);
 

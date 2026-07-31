@@ -17,19 +17,22 @@ const GROUND_CHROMA = new THREE.Color(1.0, 0.66, 0.4);
 /**
  * Luminance of the hemisphere's lower half as a fraction of its upper half.
  *
- * A quarter is roughly two stops down, which is what a stone square in shadow
- * gives back against a lit golden-hour sky band, and it leaves the ground bounce
- * present as warmth rather than as brightness.
+ * This is the whole of what a down-facing surface gets from the hemisphere, and a
+ * quarter — two stops down — was measured to be far too little. An awning soffit
+ * seen from underneath graded to rgb(32,31,26) and an interior ceiling to 44.8,
+ * both about 12-17% of range, against sunlit paving in the same frames near 200.
+ * Two stops is what a *shadowed* stone square gives back; the paving under a
+ * golden-hour awning is not shadowed, it is the brightest thing in the level, and
+ * the soffit above it sees almost nothing else. 0.42 is 1.25 stops down, which is
+ * the reflectance of dry limestone paving under a low sun rather than of the same
+ * paving in its own shade.
  *
- * This alone was never going to carry the orientation step, and the previous round
- * was wrong to expect it to. The hemisphere is a well-shaped term — 1.0 / 0.63 /
- * 0.25 to a floor, a wall and a soffit — but it was the smaller half of the fill,
- * and the env map it was being added to ran the *other* way: see uCsmSkyVis in
- * CascadedShadows for the measurement and the fix. With that weight in place these
- * two now agree in sign and the fill a surface receives finally depends on which
- * way it faces.
+ * The hemisphere is a well-shaped term — 1.0 / 0.71 / 0.42 to a floor, a wall and
+ * a soffit — but it is only half the fill, and the env map's diffuse half has to
+ * agree in sign or the orientation step cancels: see uCsmSkyVis in
+ * CascadedShadows, raised in step with this.
  */
-const GROUND_FRACTION = 0.25;
+const GROUND_FRACTION = 0.42;
 
 /**
  * How far the hemisphere's *sky* half is pulled off the warm bounce back toward
@@ -61,13 +64,17 @@ const SKY_MIX = 0.45;
  * This is deliberately a small part of the contrast fix. Sunlit high-albedo
  * plaster already sits near 200 in the graded frame, so buying key-to-fill by
  * raising the key clips the brightest surfaces in the level and costs the tone
- * axis; the room is all on the shade side. At this value with the fill trims
- * below, sunlit surfaces move by under 6% in scene-linear — a horizontal plane
- * from 2.10 to 1.97 and a sun-facing wall from 5.62 to 5.55 — while the shade
- * they are measured against drops 0.8 to 1.7 stops. Sun-versus-shade on one
- * horizontal material goes from 1.85 stops to 2.57.
+ * axis; the room is all on the shade side.
+ *
+ * Trimmed 6% from 2.05 now that the fill below carries 1.7-2.4x more. That trim
+ * is nearly free at the top of the curve and not free at all in the middle: ACES
+ * is compressive enough past display 200 that 6% of scene-linear is two or three
+ * codes on the sunlit plaster in `vista` (the one pose that was already exposed
+ * correctly, and the one this must not blow), while it holds the key:fill ratio
+ * that separates a lit facade from a shaded one now that the shaded one is no
+ * longer 1.5 stops under.
  */
-const KEY_BOOST = 2.05;
+const KEY_BOOST = 1.93;
 
 /**
  * Sun, cascaded shadow maps, and the local light budget.
@@ -117,18 +124,24 @@ export class Lighting {
      * fraction of the sky fill but the strength of the bounce term the hemisphere
      * takes over — see _syncSky.
      *
-     * Up 4.45x from 0.265, in step with the env fill below so the bounce keeps the
-     * same share of the total and the orientation step the two agree on does not
-     * change shape. Everything the previous round trimmed here it took out of the
-     * shade and nowhere else: sunlit plaster measured 145:1 in scene-linear over
-     * shaded ground, seven stops, and the review found the cost in every dark
-     * region of the frame — the oil drum at sd 5.4, the concrete barrier at 3.2,
-     * the awning soffit at 2.8, a quarter of one capture inside a single 8-code
-     * luma bin. Fill is close to free on the other end of the histogram: at 1/145
-     * of the key a sunlit surface gains about 3% from a 4.5x fill while the shade
-     * it is read against gains all of it.
+     * 2.03x over the 1.18 that four of five captures were graded at, where the
+     * whole midground of `silhouette` sat between 60 and 80 (lit facade 73.8,
+     * shade facade 61.3, paving 75.6) and the histogram's top five bins were
+     * empty. Through the ACES fit, display 70 is scene-linear 0.062 and display
+     * 105 is 0.107, so open shade needed about 1.75x more light and nothing else.
+     *
+     * Split roughly evenly with uCsmSkyVis rather than taken all here, because
+     * these two carry different chroma — the hemisphere the warm first bounce, the
+     * dome the sky — and moving the fill onto one of them would recolour the
+     * shadows. Weighted slightly toward the hemisphere anyway (2.03x against
+     * 1.41x) because bounce is the term this renderer genuinely has no source
+     * for, whereas pushing the dome much past unit irradiance is inventing sky.
+     *
+     * Fill stays close to free at the top of the histogram: at ~30:1 key-to-fill
+     * on sunlit paving a 1.75x fill adds about 2% to the lit surface and 75% to
+     * the shade it is read against.
      */
-    this.iblFillFactor = 1.18;
+    this.iblFillFactor = 2.4;
     /**
      * `scene.environmentIntensity`, i.e. how much of the sky's IBL reaches the
      * world. Not a multiplier on Materials' authored figures: Three *replaces*

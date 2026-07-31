@@ -130,12 +130,23 @@ export class CascadedShadows {
        * why the open-sky figure is allowed past 1. Lighting's envFillScale is held
        * at 0.64 to keep reflected sky off the oil drum's lid, and that trim lands
        * on diffuse and specular alike; multiplying it back here restores the fill
-       * on the only half that was never the problem. Net of envFillScale a
-       * sky-facing surface now takes 0.88 of the dome's diffuse irradiance and a
-       * soffit 0.29, against 0.20 and 0.07 before — 4.4x more shade light at the
-       * same specular budget, holding the ~3:1 step between the two orientations.
+       * on the only half that was never the problem, and it is the only lever in
+       * this renderer that can brighten shade without touching a highlight.
+       *
+       * Both figures went up again after four of five captures graded 1.5-2 stops
+       * under. The soffit term moved most (0.45 -> 0.72) because down-facing
+       * surfaces were the worst of it — an awning underside at rgb(32,31,26), an
+       * interior ceiling at 44.8 — and because 0.45 was reading a soffit as though
+       * the ground below it were as dark as the sky above is bright, which under a
+       * golden-hour sun over pale paving it is not. Net of envFillScale a
+       * sky-facing surface now takes 1.25 of the dome's diffuse irradiance and a
+       * soffit 0.46, against 0.88 and 0.29. Past-unit on the open end is the
+       * bounce off the sunlit facades that the dome cube does not contain; the
+       * step between the two orientations narrows from 3.1:1 to 2.7:1, which is
+       * still a plain orientation read and closer to what a walled square with a
+       * bright floor actually delivers.
        */
-      uCsmSkyVis: { value: new THREE.Vector3(0.45, 1.38, 3.2) },
+      uCsmSkyVis: { value: new THREE.Vector3(0.72, 1.95, 3.2) },
       uCsmDebug: { value: 0 },
     };
 

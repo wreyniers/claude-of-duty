@@ -74,20 +74,62 @@ export class Props {
   /* --------------------------------------------------------------- geometry */
 
   /**
-   * Oil drum: rolled body, two swage rings, two rims, a bung. The rings are
-   * short wide cylinders rather than tori — a torus at a readable smoothness is
-   * 240 triangles, and there are a hundred drums' worth of instances on this map.
+   * Oil drum, in two pieces.
+   *
+   * THE RINGS WERE INVISIBLE, and that is the whole reason this is rebuilt. A
+   * short wide cylinder standing 2.5 cm proud of the shell has *exactly the
+   * shell's normals* — a vertical wall either way — so it shaded identically to
+   * the plate behind it and only existed as a 2.5 cm annulus top and bottom. With
+   * no key light on it the drum measured sd 5.4 over its entire body: one blue
+   * cylinder. A rolled hoop at four cross-section facets presents an up-and-out
+   * face and a down-and-out face instead, and under a sky-dominated fill those two
+   * differ by more than the sun ever varies the shell. That is contrast which does
+   * not wait for a key light, which is the only kind worth building here.
+   *
+   * The hoops and bungs are a second InstanceSet because one material cannot do
+   * both halves of a drum: the shell is a dielectric enamel, and the hoops are
+   * where that enamel goes first, so they are bare corroded steel and they carry
+   * the only specular event on the prop. Two draw calls for every drum on the map
+   * is the price of the close material read this prop exists for.
    */
   drumGeo() {
     const k = this.kit;
+    return bakeDrumShade(
+      mergeLocal([
+        [k.cylinder(0.284, 0.292, 0.845, DRUM_SEG, false, 12), t(0, 0.4325, 0)],
+        // Head sunk inside the top chime rather than flush with it. From standing
+        // eye height the top is the largest facet of a drum on screen, and the
+        // 2.5 cm of shaded return around a recessed head is what reads there.
+        // Inset 6 mm so the head's wall never lands coplanar with the shell's.
+        [k.cylinder(0.278, 0.278, 0.026, DRUM_SEG), t(0, 0.863, 0)],
+        [k.torus(0.17, 0.013, 12, 4), rx(0, 0.879, 0)],
+      ])
+    );
+  }
+
+  drumHoopGeo() {
+    const k = this.kit;
+    const ring = (y, r, tube) => [k.torus(r, tube, DRUM_SEG, 4), rx(0, y, 0)];
     return mergeLocal([
-      [k.cylinder(0.29, 0.29, 0.86, 12), t(0, 0.43, 0)],
-      [k.cylinder(0.315, 0.315, 0.055, 12), t(0, 0.62, 0)],
-      [k.cylinder(0.315, 0.315, 0.055, 12), t(0, 0.26, 0)],
-      [k.cylinder(0.3, 0.3, 0.06, 12), t(0, 0.85, 0)],
-      [k.cylinder(0.3, 0.3, 0.06, 12), t(0, 0.02, 0)],
-      [k.cylinder(0.05, 0.05, 0.04, 6), t(0.16, 0.87, 0)],
+      ring(DRUM_HOOP_Y[0], 0.298, 0.033),
+      ring(DRUM_HOOP_Y[1], 0.296, 0.035),
+      ring(DRUM_HOOP_Y[2], 0.296, 0.035),
+      ring(DRUM_HOOP_Y[3], 0.298, 0.033),
+      [k.cylinder(0.05, 0.056, 0.02, 6), t(0.165, 0.879, 0.02)],
+      [k.cylinder(0.031, 0.036, 0.016, 6), t(-0.1, 0.877, 0.135)],
     ]);
+  }
+
+  /** Shell and hoops on one transform: two draw calls, one drum. */
+  placeDrum(x, y, z, ry, extra) {
+    const body = this.set('drum', 'iron_painted_chipped', () => this.drumGeo());
+    const hoop = this.set('drum_hoop', 'steel_rusted', () => this.drumHoopGeo());
+    const m = this.place(body, x, y, z, ry, 1, DRUM_TINTS, extra);
+    // Hashed off the position rather than drawn from the rng: the hoops are a
+    // second colour for a prop that already exists, and consuming a draw for them
+    // would shift every placement made after the first drum on the map.
+    hoop.push(m, HOOP_TINTS[Math.abs(Math.round(x * 7 + z * 13)) % HOOP_TINTS.length]);
+    return m;
   }
 
   /** Crate: shell plus corner battens, so the silhouette has a lip. */
@@ -726,12 +768,6 @@ export class Props {
   /** Drums, crates, pallets and cans against a wall or in a yard. */
   yardClutter(zone, x, z, ry, spread = 2.4, n = 7) {
     const rng = this.rng;
-    // Painted steel, not bare steel. `steel_rusted` holds metalness 1 across the
-    // bare majority of its surface, and a metal has no diffuse term — so the paint
-    // tint landed on F0 instead of an albedo and every drum came out a black mirror
-    // with the zenith reflected in its lid. Paint is a dielectric; the recipe that
-    // models one is the one that lets a tint mean paint.
-    const drum = this.set('drum', 'iron_painted_chipped', () => this.drumGeo());
     const crate = this.set('crate', 'wood_plank_weathered', () => this.crateGeo(0.62));
     const pallet = this.set('pallet', 'wood_plank_weathered', () => this.palletGeo());
     const jerry = this.set('jerry', 'iron_painted_chipped', () => this.jerryGeo());
@@ -744,11 +780,12 @@ export class Props {
       const pz = z + dirz * t2 + rng.gauss() * 0.3;
       const roll = rng.float();
       if (roll < 0.3) {
-        this.place(drum, px, 0, pz, rng.float() * 3, 1, DRUM_TINTS);
-        this._collideCyl(zone, px, pz, 0.32, 0.88);
+        this.placeDrum(px, 0, pz, rng.float() * 3);
+        this._collideCyl(zone, px, pz, 0.335, 0.9);
       } else if (roll < 0.42) {
-        // On its side, because a yard always has one down.
-        this.place(drum, px, 0.29, pz, rng.float() * 3, 1, DRUM_TINTS, { rz: Math.PI / 2 });
+        // On its side, because a yard always has one down. It rests on its hoops,
+        // not on its shell, so the axis sits a hoop's radius off the ground.
+        this.placeDrum(px, 0.325, pz, rng.float() * 3, { rz: Math.PI / 2 });
       } else if (roll < 0.62) {
         const stack = rng.int(2) + 1;
         for (let s = 0; s < stack; s++) {
@@ -828,9 +865,29 @@ function paint(hex, chroma = 0.6, gain = 1) {
 const SANDBAG_TINTS = [0x9a917c, 0x877e69, 0xa8a08a, 0x736b5a, 0x8f866f];
 const WOOD_TINTS = [0xc9bda6, 0xb0a48c, 0xd6cbb4, 0x9c9280];
 const DEBRIS_TINTS = [0xb9b3a8, 0xa39c90, 0xc6c0b4, 0x8e887e, 0xada38f];
-// Faded industrial paint: the hue varies per drum, the value does not, and the
-// gain lifts the recipe's dark enamel to the film a drum is actually painted in.
-const DRUM_TINTS = [0x9b5f3a, 0x4a6b74, 0x8a8474, 0xa8763c, 0x5f6b52, 0xb4ada0].map((h) => paint(h, 0.55, 1.5));
+/**
+ * Faded industrial paint. Every entry used to normalise to the same 1.5, which
+ * kept the drums from going black but also meant a yard of six was six hues at
+ * one value — and value is the axis a frame is read on. These spread across a
+ * stop and a quarter, from a dark green that has been outdoors twenty years to a
+ * chalky white one, and the chroma spreads with it so the pale entries stay
+ * industrial rather than turning pastel.
+ */
+const DRUM_TINTS = [
+  paint(0x9b5f3a, 0.62, 1.35),
+  paint(0x3f6d7c, 0.66, 1.2),
+  paint(0xdcd6c8, 0.16, 2.6),
+  paint(0xc8912f, 0.7, 2.05),
+  paint(0x55703f, 0.58, 1.25),
+  paint(0x8e8578, 0.24, 1.75),
+  paint(0x7a4a2a, 0.72, 1.4),
+];
+// The hoops lost their paint first, so their tints only age the recipe's bare
+// steel rather than colouring it: they are the drum's only specular event, and a
+// saturated tint on a metal spends that on F0.
+const HOOP_TINTS = [paint(0xb9bcbe, 0.22, 1.15), paint(0x8f6a4a, 0.5, 0.95), paint(0xa89b8c, 0.3, 1.05)];
+const DRUM_SEG = 14;
+const DRUM_HOOP_Y = [0.031, 0.28, 0.6, 0.868];
 const JERRY_TINTS = [0x4d5340, 0x565b46, 0x6a5b3c].map((h) => paint(h, 0.5, 1.3));
 const GAS_TINTS = [0xa8531f, 0x2f5566, 0x8b8474].map((h) => paint(h, 0.7, 1.5));
 // Rubber's own albedo is already the 0.01-0.03 a tyre has; these only age it, and
@@ -866,6 +923,40 @@ function compose(x, y, z, sx, sy, sz, rotX = 0) {
   m.scale(new THREE.Vector3(sx, sy, sz));
   m.setPosition(x, y, z);
   return m;
+}
+
+/**
+ * Contact darkening under each rolled hoop, plus splash grit up the foot.
+ *
+ * A hoop standing 3.5 cm off the shell throws a shadow on the plate right under
+ * it, and in shade that shadow is most of what separates the two. Nothing here
+ * produces it: the hoops are a separate instanced mesh, so even a same-mesh AO
+ * term would have no shell-and-hoop geometry to occlude against, and the
+ * Batcher's grime pass only ever reaches merged geometry, never an InstanceSet.
+ * Baked into the colour attribute it costs one float3 per vertex and survives
+ * instancing, because instance colour multiplies this rather than replacing it.
+ */
+function bakeDrumShade(geo) {
+  const pos = geo.attributes.position.array;
+  const n = geo.attributes.position.count;
+  const col = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const y = pos[i * 3 + 1];
+    let f = 1.05;
+    for (let h = 0; h < DRUM_HOOP_Y.length; h++) {
+      const d = (DRUM_HOOP_Y[h] - y) / 0.12;
+      if (d > 0 && d < 1) f *= 1 - 0.26 * (1 - d) * (1 - d);
+    }
+    if (y < 0.32) {
+      const g = 1 - y / 0.32;
+      f *= 1 - 0.24 * g * g;
+    }
+    col[i * 3] = f;
+    col[i * 3 + 1] = f * 0.99;
+    col[i * 3 + 2] = f * 0.97;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  return geo;
 }
 
 /**

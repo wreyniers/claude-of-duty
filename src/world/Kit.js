@@ -812,8 +812,16 @@ export class Kit {
     return this._shape(`c${w.toFixed(3)},${h.toFixed(3)},${d.toFixed(3)},${c.toFixed(3)}`, () => chamferBox(w, h, d, c));
   }
 
-  cylinder(rt, rb, h, seg = 10, open = false) {
-    return this._shape(`y${rt},${rb},${h},${seg},${open ? 1 : 0}`, () => new THREE.CylinderGeometry(rt, rb, h, seg, 1, open));
+  /**
+   * `hSeg` is only ever worth spending on a piece that carries a vertex-baked
+   * gradient along its own axis — a drum shell with grit up its foot, say. A
+   * one-segment tube has vertices at its two ends and nothing in between, so any
+   * such bake interpolates as a single straight ramp end to end.
+   */
+  cylinder(rt, rb, h, seg = 10, open = false, hSeg = 1) {
+    return this._shape(`y${rt},${rb},${h},${seg},${open ? 1 : 0},${hSeg}`, () =>
+      new THREE.CylinderGeometry(rt, rb, h, seg, hSeg, open)
+    );
   }
 
   torus(r, tube, seg = 12, tSeg = 6) {

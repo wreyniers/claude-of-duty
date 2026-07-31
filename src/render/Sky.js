@@ -103,16 +103,16 @@ const BASE_PARAMS = {
    * shoulder a doubling of radiance is worth about ten code values. The presets
    * that override this keep their old ratio to it.
    *
-   * 0.062 did not get far enough down the shoulder to fix either symptom. Measured
-   * off a 1280x720 capture, the clear sky the establishing shot can actually see
-   * (9-27 degrees of elevation) printed 204-235, i.e. the top eighth of the range,
-   * so the vertical gradient across it was 15 levels and 52 degrees away from the
-   * sun the blue read 0.06 display saturation against 2.16 blue:red in linear —
-   * the curve had taken all of it. At 0.048 the same band prints 177-219 with the
-   * chroma up to 0.20, and the dome prints 131 at the zenith against 219 just
-   * above the horizon: an actual gradient. The sky is now about a third of a stop
-   * under a sunlit plaster wall rather than level with it, which is also where a
-   * photograph exposed for the sunlit subject puts it.
+   * 0.062 did not get far enough down the shoulder to fix either symptom. The sky
+   * the establishing shot can actually see is 9-27 degrees of elevation, and it
+   * printed across 180-227 — the top fifth of the range, where the curve has so
+   * little slope left that 52 degrees away from the sun a linear blue:red of 2.16
+   * came out at 0.06 display saturation. Measured over that whole region, 0.048
+   * moves it to 133-230 and takes its mean saturation from 0.070 to 0.091, its
+   * ninth decile from 0.116 to 0.181, and its bluest tenth from rgb(180,200,209)
+   * to rgb(162,190,204). The sky is now about a third of a stop under a sunlit
+   * plaster wall rather than level with it, which is where a photograph exposed
+   * for the sunlit subject puts it.
    */
   lum: 0.048,
   sunLum: 190, // sun disc radiance: far above 1 so PostFX's bloom has an HDR source

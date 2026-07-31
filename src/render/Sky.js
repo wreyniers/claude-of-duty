@@ -109,8 +109,8 @@ const BASE_PARAMS = {
    * so the vertical gradient across it was 15 levels and 52 degrees away from the
    * sun the blue read 0.06 display saturation against 2.16 blue:red in linear —
    * the curve had taken all of it. At 0.048 the same band prints 177-219 with the
-   * chroma up to 0.20, and the sky one shot up prints 131 at the zenith against
-   * 219 at the horizon: an actual gradient. The sky is now about a third of a stop
+   * chroma up to 0.20, and the dome prints 131 at the zenith against 219 just
+   * above the horizon: an actual gradient. The sky is now about a third of a stop
    * under a sunlit plaster wall rather than level with it, which is also where a
    * photograph exposed for the sunlit subject puts it.
    */

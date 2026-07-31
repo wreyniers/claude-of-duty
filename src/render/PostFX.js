@@ -86,8 +86,9 @@ const AOCompositeShader = {
     tDepth: { value: null },
     uCamPlanes: { value: null },
     uStrength: { value: 0.95 },
+    uNearBoost: { value: 1.35 },
     uWide: { value: 0.9 },
-    uWideFloor: { value: 0.15 },
+    uWideFloor: { value: 0.11 },
     uFade: { value: null }, // metres: the wide term fades out between x and y
   },
   vertexShader: /* glsl */ `
@@ -106,6 +107,7 @@ uniform sampler2D tAoWide;
 uniform sampler2D tDepth;
 uniform vec2 uCamPlanes;
 uniform float uStrength;
+uniform float uNearBoost;
 uniform float uWide;
 uniform float uWideFloor;
 uniform vec2 uFade;
@@ -122,6 +124,15 @@ void main() {
 	float dist = ( uCamPlanes.x * uCamPlanes.y ) / ( uCamPlanes.y - ( uCamPlanes.y - uCamPlanes.x ) * d );
 
 	float near = texture2D( tAoNear, vUv ).r;
+	// GTAO answers a plaster corner with about 0.88 where the eye expects nearer
+	// 0.5, and every honest reason for that — three directions, four steps, and
+	// normals differenced out of a depth buffer — is a sampling cost this box
+	// cannot pay. What it can do is stop spending the answer linearly. A slope on
+	// the occluded half of the range leaves full visibility at exactly 1.0, so
+	// open ground and sunlit facades keep the value they already have and only
+	// junctions move; a gamma on the same term would have dimmed the entire frame
+	// to buy one contact, in a set of frames already read as under-exposed.
+	near -= uNearBoost * near * ( 1.0 - near );
 	float wide = max( texture2D( tAoWide, vUv ).r, uWideFloor );
 	// The far band's radiance is mostly in-scattered air by then, and air in front
 	// of a surface is not occluded by that surface's neighbours — so the further out
@@ -346,9 +357,10 @@ void main() {
  * from a pixel toward the sun's vanishing point is blocked — and that line *is*
  * the projection of the sun's shadow volume, because everything radially outward
  * from the sun behind an occluder is exactly what that occluder shadows.
- * Accumulating the sky's own radiance along it therefore measures how much of the
- * air in front of this pixel is still lit, which is the quantity crepuscular rays
- * are made of. Occlusion is the mask; nothing else gates the effect.
+ * Accumulating the radiance of whatever is *still in sun* along it therefore
+ * measures how much of the air in front of this pixel is lit, which is the
+ * quantity crepuscular rays are made of. Occlusion is the mask; nothing else
+ * gates the effect.
  *
  * Three things stop it becoming the whole-frame glow that gives this technique
  * away. It is confined to a forward-scatter lobe around the sun instead of being
@@ -372,6 +384,11 @@ const LightShaftShader = {
     uDensity: { value: 1.0 },
     uMaxRadiance: { value: 3.0 },
     uAureole: { value: 0.08 },
+    // Scene-referred radiance either side of the bright-pass ramp: below x a
+    // surface is lit by fill and cannot be a source, above y it is standing in
+    // direct sun. Shaded interior plaster measures ~0.02 here, a sunlit patch on
+    // the same wall ~0.5, open sky ~1.2.
+    uBright: { value: null },
     uSeed: { value: 0 },
   },
   vertexShader: /* glsl */ `
@@ -393,6 +410,7 @@ uniform float uDecay;
 uniform float uDensity;
 uniform float uMaxRadiance;
 uniform float uAureole;
+uniform vec2 uBright;
 uniform float uSeed;
 
 float hash21( vec2 p ) {
@@ -413,9 +431,8 @@ void main() {
 	// Beams and an aureole are the same integral, and only one of them is worth
 	// paying for. With the disc standing in clear sky every pixel's sun-ward taps
 	// are sky all the way, so the term has no structure left in it and lands as a
-	// glow around the sun that the bloom and the aerial in-scatter already deliver
-	// — which is why five poses at a strength tuned for that case showed no beam
-	// anywhere. With the disc behind a roofline, a minaret or a palm crown the mask
+	// glow around the sun that the bloom and the aerial in-scatter already deliver.
+	// With the disc behind a roofline, a minaret, a market awning or a wall the mask
 	// is the whole signal, and the gain it needs is an order of magnitude larger.
 	// A disc rather than one texel: a single sample can fall between two fronds and
 	// swing the gain of the entire frame from one frame to the next.
@@ -438,10 +455,20 @@ void main() {
 
 	for ( int i = 0; i < SAMPLES; i ++ ) {
 		vec2 s = clamp( uv, vec2( 0.0 ), vec2( 1.0 ) );
-		// Cleared depth is the only value in the buffer that means "no geometry
-		// between this point and the atmosphere".
+		vec3 rad = min( texture2D( tDiffuse, s ).rgb, vec3( uMaxRadiance ) );
+		// Cleared depth means "no geometry between this point and the atmosphere",
+		// which is a sufficient condition for the air along this tap to be lit and
+		// the only one an exterior needs. It is not a necessary one, and taking it
+		// as necessary is why an interior produced nothing: a room's openings look
+		// out at a wall across the street, never at sky, so every tap failed and the
+		// integral was zero at exactly the pose the technique exists for. What
+		// actually marks air as lit is that the surface behind it is standing in the
+		// sun, and the frame already says which surfaces those are — the sunlit
+		// patch a window throws on the far wall is two decades above the fill around
+		// it. So the mask is a bright pass, with sky as its guaranteed member.
 		float sky = step( 0.999995, texture2D( tDepth, s ).x );
-		acc += ( w * sky ) * min( texture2D( tDiffuse, s ).rgb, vec3( uMaxRadiance ) );
+		float lit = max( sky, smoothstep( uBright.x, uBright.y, dot( rad, vec3( 0.2126, 0.7152, 0.0722 ) ) ) );
+		acc += ( w * lit ) * rad;
 		wsum += w;
 		// Weighting the near taps hardest keeps a shaft attached to the silhouette
 		// that cast it instead of streaking the full radius uniformly.
@@ -528,7 +555,15 @@ class ViewModelPass extends Pass {
       colorSpace: THREE.LinearSRGBColorSpace,
       depthBuffer: true, // the rig self-occludes; there is no other depth for it
       stencilBuffer: false,
-      samples: 0,
+      // The world's silhouettes are resolved by SMAA on the finished LDR frame.
+      // The weapon's cannot be: its coverage travels in alpha, and a one-pixel
+      // alpha step around the optic's lens circle carries no luminance gradient
+      // for a morphological filter to find a shape in — SMAA sees a clean edge
+      // and leaves it. Hardware multisample is the only thing in the chain that
+      // resolves a curve on the object sitting in the middle of every frame, and
+      // the resolve lands in the texture before the grade reads it, so the
+      // partial coverage arrives premultiplied and composites correctly.
+      samples: 4,
     });
     this.target.texture.name = 'PostFX.viewmodel';
   }
@@ -753,17 +788,16 @@ export class PostFX {
      * Peak shaft radiance as a multiple of the sky's own, before the distance
      * weighting and before the pass' own open-sky gate.
      *
-     * The previous 0.15 was picked for the case where the sun stands in clear sky,
-     * where the whole term is a glow and anything larger only widens it. That is
-     * now the pass' own gate, which cuts the gain to a twelfth by itself, so this
-     * number is free to be what the case the rubric actually asks about needs: a
-     * disc behind geometry, where the visible signal is the contrast between a lit
-     * column of air and a shadowed one and 0.15 of the sky's radiance is a couple
-     * of display levels. An interior beam is the tightest constraint — it crosses
-     * a few metres of air, so the grade's path term has already taken it down to a
-     * fifth before it reaches the floor.
+     * 1.35 was calibrated against a mask that could only see sky, which in the two
+     * poses where the disc is occluded returned a hard zero — the gain was free to
+     * be anything because it was multiplying nothing. Now that the mask counts
+     * sunlit surfaces as sources, the same number lifted a shaded plaza by most of
+     * a stop, so it has to be re-derived against a mask that actually fires: a
+     * beam should read as a beam and not as a second exposure. The open-sky case is
+     * unaffected either way, because the pass' own aureole gate has already cut it
+     * to a twelfth by the time this multiplies.
      */
-    this.shaftStrength = 1.35;
+    this.shaftStrength = 0.6;
 
     /**
      * Airlight path density for the shaft term, as a multiple of the sky's own
@@ -777,14 +811,16 @@ export class PostFX {
      * average assumes, and it now tracks the preset — `dust` doubles the density and
      * the beams saturate over half the distance with it.
      *
-     * Eight rather than four because the binding case is a room: the aerial density
-     * is a column average over hundreds of metres of mostly clean air, while a beam
-     * is only ever seen in the smoke and plaster dust of a shelled interior, and at
-     * a 48 m e-folding length a beam had lost seven eighths of itself before it
-     * reached a floor six metres away. It still leaves the foreground protected —
-     * two metres of air is 8% of the term.
+     * The binding case is a room: the aerial density is a column average over
+     * hundreds of metres of mostly clean air, while a beam is only ever seen in the
+     * smoke and plaster dust of a shelled interior. Eight was still a 37 m e-folding
+     * length, which spends six sevenths of a beam before it has crossed a six-metre
+     * room; fourteen brings that to 21 m, so an interior keeps a quarter of the term
+     * instead of a seventh. It still leaves the foreground protected — two metres of
+     * air is 9% of it, which is what stops the weapon and the near cobbles from
+     * picking up a haze they have no air in front of.
      */
-    this.shaftDust = 8.0;
+    this.shaftDust = 14.0;
 
     this.composer = null;
     this.sceneTarget = null;
@@ -820,6 +856,7 @@ export class PostFX {
     this._sunClip = new THREE.Vector4();
     this._camPlanes = new THREE.Vector2(0.08, 900);
     this._aoFade = new THREE.Vector2(90, 260);
+    this._shaftBright = new THREE.Vector2(0.18, 0.5);
 
     this._projClean = new THREE.Matrix4();
     this._viewProjClean = new THREE.Matrix4();
@@ -921,13 +958,29 @@ export class PostFX {
       ao.updateGtaoMaterial({
         radius: 0.9,
         distanceExponent: 1.0,
-        thickness: 0.85,
-        distanceFallOff: 1.0,
-        scale: 1.05,
+        // Held just above the radius rather than just below it. GTAO rejects any
+        // sample whose view depth differs from the shading point by more than
+        // this, and the samples that prove a corner *is* a corner are the ones on
+        // the perpendicular wall running away from the eye — at a 0.9 m radius
+        // those are up to 0.9 m of depth, so a 0.85 m thickness was discarding
+        // most of the evidence for the one feature the pass exists to find.
+        thickness: 1.15,
+        // This discounts the horizon rise from the outer steps: at 1.0 the fourth
+        // and last step of four counts for 0.4 of what it measures, which caps the
+        // answer well below the geometry. The contact pass only reaches 0.9 m in
+        // the first place, so there is no far sample here that needs distrusting.
+        distanceFallOff: 0.5,
+        scale: 1.3,
         samples: software ? 12 : 16,
         screenSpaceRadius: false,
       });
-      ao.updatePdMaterial({ lumaPhi: 12, depthPhi: 1.4, normalPhi: 3.5, radius: 5, samples: software ? 8 : 12, rings: 2, radiusExponent: 1.6 });
+      // lumaPhi is the denoiser's tolerance for occlusion *difference* between
+      // neighbours, and at 12 against a signal that lives in [0,1] it was infinite:
+      // every tap weighted equally, so a five-texel Poisson disc flattened exactly
+      // the contact this pass is for. Its normal and depth terms already protect a
+      // corner, because a corner has both; a crate meeting a floor has neither and
+      // was being blurred into the floor.
+      ao.updatePdMaterial({ lumaPhi: 1.0, depthPhi: 1.4, normalPhi: 3.5, radius: 4, samples: software ? 8 : 12, rings: 2, radiusExponent: 1.6 });
       // Neither pass composites itself. One shader resolves both scales, which is
       // also one full-screen blit cheaper than GTAOPass' own copy-then-blend.
       ao.output = GTAOPass.OUTPUT.Off;
@@ -959,19 +1012,17 @@ export class PostFX {
         // exponent pulls the two apart where it matters without moving open ground,
         // whose visibility is already 1.
         //
-        // 1.25 measures as a 20% fall into a wall's floor junction, against a factor
-        // of two for the contact pass on a crate, and 1.7 was tried to close that
-        // gap. It changes less than it looks like it should: a market awning's
-        // underside, the most enclosed surface in the five review poses, measures
-        // identically under both (mean 25.9, sd 3.2) because its raw visibility is
-        // already below uWideFloor, and the exponent cannot reach what the floor has
-        // clamped. So the exponent only ever moves the middle of the band, and no
-        // pose in the set showed that middle needing more than 1.25 buys. Deepening
-        // the enclosed end is uWideFloor's decision, and it is deliberately bounded:
-        // occlusion multiplied into one composited radiance cannot tell an occluder
-        // from a source, and most of what an awning's hemisphere holds is sunlit
-        // ground bouncing light back up into it.
-        scale: 1.25,
+        // The exponent only ever moves the middle of the band: the most enclosed
+        // surface in the five poses, a market awning's underside, measures the same
+        // at 1.25 as at 1.7 because its raw visibility is already under uWideFloor
+        // and an exponent cannot reach what the floor has clamped. So this buys the
+        // wall-to-wall corners and the window reveals, which is where the review
+        // measured a room reading as one flat dimming, and the enclosed end is
+        // uWideFloor's decision. That floor stays deliberately bounded: occlusion
+        // multiplied into one composited radiance cannot tell an occluder from a
+        // source, and most of what an awning's hemisphere holds is sunlit ground
+        // bouncing light back up into it.
+        scale: 1.5,
         samples: software ? 9 : 12,
         screenSpaceRadius: false,
       });
@@ -1049,6 +1100,7 @@ export class PostFX {
       const shafts = new LightShaftPass(w, h, software ? 0.25 : 0.34, software ? 14 : 20);
       shafts.uniforms.tDepth.value = this.depthTexture;
       shafts.uniforms.uSunUv.value = this._sunUv;
+      shafts.uniforms.uBright.value = this._shaftBright;
       shafts.uniforms.uAspect.value = w / h;
       this.shafts = shafts;
       this.composer.addPass(shafts);
@@ -1220,7 +1272,12 @@ export class PostFX {
       const off = Math.max(Math.abs(nx), Math.abs(ny));
       // Below the horizon there is no direct beam left to be occluded.
       const daylight = THREE.MathUtils.clamp(dir.y * 12, 0, 1);
-      const s = this.shaftStrength * daylight * (1 - THREE.MathUtils.smoothstep(off, 1.0, 2.4));
+      // A vanishing point off the edge of the frame is still the point every sun
+      // ray converges toward, and a room lit through a window it cannot see is
+      // exactly the case that needs the pass. Only the lobe's own exponential
+      // should decide where the term dies; this gate is the far backstop, and at
+      // 1.0 it was cutting the effect off inside the frustum's own diagonal.
+      const s = this.shaftStrength * daylight * (1 - THREE.MathUtils.smoothstep(off, 1.2, 3.2));
       this.shafts.enabled = s > 0.002;
       grade.uniforms.uShaft.value = s;
     } else {

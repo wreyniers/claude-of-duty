@@ -99,8 +99,8 @@ export class Props {
         [k.cylinder(0.284, 0.292, 0.845, DRUM_SEG, false, 12), t(0, 0.4325, 0)],
         // Head sunk inside the top chime rather than flush with it. From standing
         // eye height the top is the largest facet of a drum on screen, and the
-        // 2.5 cm of shaded return around a recessed head is what reads there.
-        // Inset 6 mm so the head's wall never lands coplanar with the shell's.
+        // 2.5 cm of shaded return around a recessed head is what reads there. The
+        // 6 mm inset keeps the head's wall off the shell's, which would z-fight.
         [k.cylinder(0.278, 0.278, 0.026, DRUM_SEG), t(0, 0.863, 0)],
         [k.torus(0.17, 0.013, 12, 4), rx(0, 0.879, 0)],
       ])

@@ -112,13 +112,23 @@ export class Lighting {
 
     this.sunIntensityScale = 1;
     this.fillScale = 1;
-    // Weight of the hemisphere light once an env map is present. It is no longer a
-    // fraction of the sky fill but the strength of the bounce term the hemisphere
-    // takes over — see _syncSky. Down from 0.47 partly as a trim and partly for
-    // bookkeeping: SKY_MIX raises the mixed chroma's own luminance from 0.75 to
-    // 0.97, so about a third of the drop buys nothing and only holds the delivered
-    // fill where it was aimed.
-    this.iblFillFactor = 0.265;
+    /**
+     * Weight of the hemisphere light once an env map is present. It is not a
+     * fraction of the sky fill but the strength of the bounce term the hemisphere
+     * takes over — see _syncSky.
+     *
+     * Up 4.45x from 0.265, in step with the env fill below so the bounce keeps the
+     * same share of the total and the orientation step the two agree on does not
+     * change shape. Everything the previous round trimmed here it took out of the
+     * shade and nowhere else: sunlit plaster measured 145:1 in scene-linear over
+     * shaded ground, seven stops, and the review found the cost in every dark
+     * region of the frame — the oil drum at sd 5.4, the concrete barrier at 3.2,
+     * the awning soffit at 2.8, a quarter of one capture inside a single 8-code
+     * luma bin. Fill is close to free on the other end of the histogram: at 1/145
+     * of the key a sunlit surface gains about 3% from a 4.5x fill while the shade
+     * it is read against gains all of it.
+     */
+    this.iblFillFactor = 1.18;
     /**
      * `scene.environmentIntensity`, i.e. how much of the sky's IBL reaches the
      * world. Not a multiplier on Materials' authored figures: Three *replaces*
@@ -127,14 +137,16 @@ export class Lighting {
      * view-model rig hands one over explicitly, so the weapon keeps its own).
      * Sky leaves the scene value at 1, so 1 is the number this is trimming.
      *
-     * This scales diffuse *and* specular together, which is why the shape of the
-     * diffuse term is fixed in the shader instead (uCsmSkyVis) and this number is
-     * now only a level trim. The last third of a stop it gives up here is aimed at
-     * specular rather than at fill: the oil drum's lid was reading as a blown
-     * blue-cyan patch of reflected sky, and every thin metal edge in the level was
-     * speckled with the same.
+     * This scales diffuse *and* specular together, so it is the wrong place to buy
+     * back the fill: the reason it was cut to 0.32 was a blown blue-cyan patch of
+     * reflected sky on the oil drum's lid, and that reading is still the budget it
+     * has to stay inside. It is therefore now only the *specular* budget — half a
+     * stop under the 1.0 that blew out, which is enough for the drum and the thin
+     * metal edges to get a highlight at all rather than none — and the diffuse half
+     * is multiplied back up per orientation in the shader, where specular cannot
+     * follow it. See uCsmSkyVis in CascadedShadows.
      */
-    this.envFillScale = 0.32;
+    this.envFillScale = 0.64;
 
     const soft = game.forge?.softwareGL === true;
     this.maxPointLights = soft ? 4 : 8;

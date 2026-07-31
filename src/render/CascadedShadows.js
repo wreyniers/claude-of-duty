@@ -105,7 +105,7 @@ export class CascadedShadows {
       // coarse texels ask for a metre of bias and the shadow slides off its owner.
       uCsmBiasMax: { value: new THREE.Vector4(0.05, 0.08, 0.14, 0.2) },
       /**
-       * Sky visibility for the *diffuse* half of the IBL: (soffit, open sky,
+       * Orientation weight for the *diffuse* half of the IBL: (soffit, open sky,
        * falloff exponent), evaluated against Three's own hemisphere weight
        * `0.5 + 0.5 * worldNormal.y`.
        *
@@ -125,8 +125,17 @@ export class CascadedShadows {
        * visible surface mostly escapes, while the diffuse term is the whole
        * hemisphere, which is exactly what the geometry we do not put in the cube
        * blocks. It also costs nothing on the reflections the metals need.
+       *
+       * That one-way split is also why these are weights and not fractions, and
+       * why the open-sky figure is allowed past 1. Lighting's envFillScale is held
+       * at 0.64 to keep reflected sky off the oil drum's lid, and that trim lands
+       * on diffuse and specular alike; multiplying it back here restores the fill
+       * on the only half that was never the problem. Net of envFillScale a
+       * sky-facing surface now takes 0.88 of the dome's diffuse irradiance and a
+       * soffit 0.29, against 0.20 and 0.07 before — 4.4x more shade light at the
+       * same specular budget, holding the ~3:1 step between the two orientations.
        */
-      uCsmSkyVis: { value: new THREE.Vector3(0.21, 0.62, 3.2) },
+      uCsmSkyVis: { value: new THREE.Vector3(0.45, 1.38, 3.2) },
       uCsmDebug: { value: 0 },
     };
 

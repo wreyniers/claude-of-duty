@@ -44,6 +44,10 @@ import * as THREE from 'three';
  *   uAerialZenith  vec3  linear in-scatter colour at the zenith
  *   uAerialSunTint vec3  forward-scatter tint added toward the sun
  *   uAerialParams  vec4  (density per metre, 1/heightScale, sun glow, max blend)
+ *   uAerialDust    vec4  (dust density/m, 1/dustHeight, forward exponent, uv scale)
+ *   uAerialDustCol vec3  linear radiance of sunlit dust
+ *   uAerialDustFlow vec2 scrolled uv offset for the dust patch field
+ *   uAerialNoise   sampler2D  the cloud band texture, reused for dust patches
  *
  * Anything with its own shader can either call `applyAerialPerspective(mat)`
  * (works on any lit Three material — it rewrites the fog chunk) or read these
@@ -170,6 +174,30 @@ const BASE_PARAMS = {
    * which the density term already leaves alone.
    */
   aerialMax: 0.75,
+  /**
+   * Airborne dust. The Rayleigh/Mie term above is a *distance* cue and is
+   * correctly tuned as one — it deliberately does nothing in the first twenty
+   * metres, which is why the air in this map reads as perfectly clean glass. Real
+   * street air at a low sun is not clean and not uniform: it carries lifted grit
+   * that is invisible looking away from the sun and obvious looking into it,
+   * because grains this size scatter almost entirely forward.
+   *
+   * So this term is additive, gated on a forward lobe, and gated on altitude. Away
+   * from the sun it contributes nothing at all rather than a small floor — a floor
+   * is what turns a scattering term into a whole-frame veil, which is the failure
+   * the aerial density and the cirrus sheet were both already pulled back from.
+   *
+   * 0.0067/m against a 7 m scale height is about 12% single-scatter at 30 m along
+   * a horizontal ray, which at the establishing shot's 41 degrees off the sun is a
+   * lift of roughly 0.006 in linear units: a fifth of a stop on open shade, two
+   * percent on a sunlit wall, and nothing at all on the cobbles under the eye.
+   */
+  dustDensity: 0.0067,
+  dustHeight: 7,
+  dustLobe: 3.0, // pow() stand-in for a large-particle forward phase function
+  dustScale: 1 / 40, // one patch tile per this many metres: street-sized plumes
+  dustLum: 0.05, // fraction of the sun's radiance a dust grain returns
+  dustDrift: 0.5, // m/s, so the plumes crawl rather than shimmer
   fogDensity: 0.0042,
   stars: 0,
   groundTint: 0x6a6154,
@@ -203,6 +231,10 @@ export const SKY_PRESETS = {
     fogDensity: 0.006,
     sunTintMix: 0.3,
     windDeg: 200,
+    // A night of still air settles the grit, so dawn is the cleanest hour of the
+    // day; what little is left is lit almost edge-on and reads brightly.
+    dustDensity: 0.004,
+    dustLum: 0.055,
   },
   noon: {
     elevation: 66,
@@ -221,6 +253,11 @@ export const SKY_PRESETS = {
     aerialGlow: 0.3,
     fogDensity: 0.0028,
     sunTintMix: 0.7,
+    // Thermals lift more of it than at any other hour, but a 66-degree sun puts
+    // the forward lobe out of frame, so the density is up and the return is down.
+    dustDensity: 0.0075,
+    dustHeight: 10,
+    dustLum: 0.03,
   },
   dusk: {
     elevation: 1.2,
@@ -239,6 +276,10 @@ export const SKY_PRESETS = {
     fogDensity: 0.0065,
     sunTintMix: 0.24,
     stars: 0.15,
+    // A whole day of traffic is still hanging in the street and the sun is nearly
+    // on the horizon, so the lobe points straight down it.
+    dustDensity: 0.013,
+    dustLum: 0.085,
   },
   overcast: {
     elevation: 34,
@@ -261,6 +302,7 @@ export const SKY_PRESETS = {
     aerialMax: 0.82, // a flat overcast may converge harder than a clear sky
     fogDensity: 0.011,
     sunTintMix: 0.8,
+    dustLum: 0.012, // no beam to catch: dust under cloud is grey, not lit
   },
   night: {
     elevation: -14,
@@ -281,6 +323,7 @@ export const SKY_PRESETS = {
     fogDensity: 0.005,
     stars: 1,
     sunTintMix: 0.5,
+    dustLum: 0, // nothing above the horizon to light it
   },
 };
 
@@ -633,6 +676,10 @@ uniform vec3 uAerialHorizon;
 uniform vec3 uAerialZenith;
 uniform vec3 uAerialSunTint;
 uniform vec4 uAerialParams;
+uniform vec4 uAerialDust;
+uniform vec3 uAerialDustCol;
+uniform vec2 uAerialDustFlow;
+uniform sampler2D uAerialNoise;
 `;
 
 /**
@@ -643,6 +690,12 @@ uniform vec4 uAerialParams;
  * its base sits in.
  * Contrast is dropped before the tint is applied because distant detail loses
  * local contrast before it takes on the sky's hue.
+ *
+ * The dust block after it is a second, independent medium and not a knob on the
+ * first: molecular scattering is a smooth function of distance, dust is patchy,
+ * hugs the ground, and only exists visually when you are looking into the sun.
+ * Sharing one term between them is what makes procedural haze read as a filter
+ * laid over the frame instead of as air the scene is standing in.
  */
 const AERIAL_FRAG_BODY = /* glsl */ `
 {
@@ -667,6 +720,23 @@ const AERIAL_FRAG_BODY = /* glsl */ `
 	float aLum = dot( gl_FragColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
 	gl_FragColor.rgb = mix( gl_FragColor.rgb, vec3( aLum ), aF * 0.3 );
 	gl_FragColor.rgb = mix( gl_FragColor.rgb, aAir, aF );
+
+	float dK = uAerialDust.y;
+	float dBase = exp( -max( uAerialCam.y, 0.0 ) * dK );
+	float dOd = abs( aDy ) > 0.05 ? dBase * ( 1.0 - exp( -aDy * dK ) ) / ( aDy * dK ) * aDist : dBase * aDist;
+	// One tap, four octaves: the noise texture packs a different band per channel
+	// at the same uv, so the plumes get fBm structure for a single fetch. The
+	// sample sits at the ray midpoint and is clamped to 26 m because beyond that
+	// the field is being read faster than it varies and turns into a flat wash —
+	// which is exactly the veil this term must not become.
+	vec3 dP = uAerialCam + aDir * min( aDist * 0.5, 26.0 );
+	vec4 dN = texture2D( uAerialNoise, dP.xz * uAerialDust.w + uAerialDustFlow );
+	float dPatch = dN.r * 0.5 + dN.g * 0.3 + dN.a * 0.2;
+	// Squared, so the field spends most of its area near empty and the plumes are
+	// events. A dust term with a flat histogram is a fog term with extra steps.
+	dPatch = 0.25 + 1.7 * dPatch * dPatch;
+	float dF = 1.0 - exp( -dOd * uAerialDust.x * dPatch );
+	gl_FragColor.rgb += uAerialDustCol * ( dF * pow( aCs, uAerialDust.z ) );
 }
 `;
 
@@ -699,6 +769,12 @@ export class Sky {
       uAerialZenith: { value: new THREE.Color(0.25, 0.38, 0.62) },
       uAerialSunTint: { value: new THREE.Color(1, 0.7, 0.42) },
       uAerialParams: { value: new THREE.Vector4(0.0034, 1 / 70, 0.55, 0.75) },
+      uAerialDust: { value: new THREE.Vector4(0.0067, 1 / 7, 3.0, 1 / 40) },
+      uAerialDustCol: { value: new THREE.Color(0, 0, 0) },
+      uAerialDustFlow: { value: new THREE.Vector2() },
+      // Filled in init(); shared by reference, so materials patched before the
+      // texture exists still pick it up.
+      uAerialNoise: { value: null },
     };
 
     // Scratch. update() runs every frame and must not allocate.
@@ -716,6 +792,8 @@ export class Sky {
     this._lastChildCount = -1;
     this._scanCooldown = 0;
     this._elapsed = 0;
+    this._dustDirX = 0;
+    this._dustDirZ = 1;
     this._visit = this._visit.bind(this);
   }
 
@@ -746,6 +824,7 @@ export class Sky {
       this.cloudNoise = forge.texture('sky_cloud_bands');
     }
     if (!this.cloudNoise) this.cloudNoise = makeNoise();
+    this.aerialUniforms.uAerialNoise.value = this.cloudNoise;
     this.stats.noiseMs = +(performance.now() - tn).toFixed(1);
 
     this.material = new THREE.ShaderMaterial({
@@ -949,6 +1028,12 @@ export class Sky {
     a.uAerialZenith.value.copy(this.zenithColor).multiplyScalar(1.02);
     a.uAerialSunTint.value.copy(u.uSunRadiance.value).multiplyScalar(0.22);
     a.uAerialParams.value.set(p.aerialDensity, 1 / p.aerialHeight, p.aerialGlow, p.aerialMax);
+    a.uAerialDust.value.set(p.dustDensity, 1 / p.dustHeight, p.dustLobe, p.dustScale);
+    // Dust returns the sun's own radiance, so it dies with the sun instead of
+    // needing a separate night override.
+    a.uAerialDustCol.value.copy(u.uSunRadiance.value).multiplyScalar(p.dustLum);
+    this._dustDirX = Math.sin(wd);
+    this._dustDirZ = Math.cos(wd);
 
     const fog = this.game.scene.fog;
     if (fog) {
@@ -1161,6 +1246,11 @@ export class Sky {
     this.dome.position.copy(cam.position);
     this.material.uniforms.uTime.value = this._elapsed;
     this.aerialUniforms.uAerialCam.value.copy(cam.position);
+    // The dust field is anchored in world space, so the drift has to be applied as
+    // a uv offset rather than by moving the sample point: at 0.5 m/s the plumes
+    // must not slide when the player does.
+    const drift = this.params.dustDrift * this.params.dustScale * this._elapsed;
+    this.aerialUniforms.uAerialDustFlow.value.set(this._dustDirX * drift, this._dustDirZ * drift);
 
     // Level, decals and particles all add meshes after this module booted. A
     // change in child count is a cheap proxy for "something new arrived"; the

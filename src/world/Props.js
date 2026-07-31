@@ -42,6 +42,7 @@ export class Props {
     this.Q = new THREE.Quaternion();
     this.E = new THREE.Euler();
     this.S = new THREE.Vector3();
+    this.S2 = new THREE.Vector3();
     this.P = new THREE.Vector3();
   }
 
@@ -153,12 +154,34 @@ export class Props {
     return mergeLocal(parts);
   }
 
-  /** Sandbag: a squashed sphere with a tied ear. Laid in courses, never in a grid. */
+  /**
+   * Sandbag: a squashed sphere with a sewn ear at each end.
+   *
+   * THE COURSES WERE INVISIBLE. An 8x5 sphere squashed flat gives a bag whose
+   * every facet faces up-and-out by roughly the same amount, so under a
+   * sky-dominated fill one bag shades exactly like the bag beside it and a
+   * three-course emplacement four metres away measured sd 8 over its whole face:
+   * stacked tan foam. A bag is not shaded by the sky, though — it is shaded by
+   * the bags around it, and none of that occlusion exists here because each bag
+   * is one instance of one mesh with no neighbours to occlude against and the
+   * Batcher's grime pass never reaches an InstanceSet.
+   *
+   * So it is baked, like the drum's hoop shade: dark under the belly where the
+   * course below cuts the sky off, dark at the two ends where the neighbours in
+   * the same course do, bright on the crown. That is per-bag contrast that costs
+   * one float3 per vertex, survives instancing (instance colour multiplies it),
+   * and scales with whatever light the emplacement is standing in — which matters,
+   * because this prop is nearly always standing in shade.
+   */
   bagGeo() {
     const k = this.kit;
-    return mergeLocal([
-      [k.sphere(0.5, 8, 5), s3(0.44, 0.22, 0.3)],
-    ]);
+    return bakeBagShade(
+      mergeLocal([
+        [k.sphere(0.5, 10, 6), s3(0.44, 0.23, 0.32)],
+        [k.sphere(0.5, 5, 4), compose(0.2, 0.005, 0, 0.1, 0.055, 0.19)],
+        [k.sphere(0.5, 5, 4), compose(-0.2, 0.0, 0, 0.1, 0.05, 0.17)],
+      ])
+    );
   }
 
   /**
@@ -257,17 +280,28 @@ export class Props {
     for (let c = 0; c < courses; c++) {
       const short = c === courses - 1 ? rng.int(3) : 0;
       const off = (c & 1) * 0.5;
+      const top = c === courses - 1;
       for (let i = 0; i < per - short; i++) {
         const t2 = (i + off - (per - 1) / 2) * bagW * 0.9;
+        // Headers on the top course only. A stretcher-bonded stack has the same
+        // profile at every bag, so the wall's top line — which is its whole
+        // silhouette against a lit square — comes out ruled. Turning a third of
+        // the top course across the wall breaks that line and lets two bags
+        // overhang the face, which is what a real one does within a week.
+        const header = top && rng.float() < 0.34;
+        // Non-uniform, because a filled bag settles into whatever it is stacked
+        // on: they are not all the same sack seen at different sizes.
+        const s = rng.range(0.94, 1.07);
+        this.S2.set(s * rng.range(0.95, 1.09), s * rng.range(0.88, 1.06), s * rng.range(0.95, 1.12));
         this.place(
           set,
-          x + dx * t2 + rng.range(-0.025, 0.025),
-          y + 0.1 + c * 0.19,
-          z + dz * t2 + rng.range(-0.03, 0.03),
-          angle + rng.range(-0.13, 0.13),
-          rng.range(0.94, 1.07),
+          x + dx * t2 + rng.range(-0.03, 0.03),
+          y + 0.1 + c * 0.19 + rng.range(-0.016, 0.016),
+          z + dz * t2 + rng.range(-0.035, 0.035),
+          angle + (header ? Math.PI / 2 : 0) + rng.range(-0.17, 0.17),
+          this.S2,
           SANDBAG_TINTS,
-          { rz: rng.range(-0.08, 0.08) }
+          { rz: rng.range(-0.13, 0.13), rx: rng.range(-0.09, 0.09) }
         );
       }
     }
@@ -326,18 +360,38 @@ export class Props {
   }
 
   /**
-   * Burnt-out car hulk. Built from chamfered masses with the roof pressed in and
-   * the glazing gone: a wreck reads by silhouette, so the shape gets the effort
-   * and the material stays uniformly dark and rough.
+   * Burnt-out car hulk. Five metres from the establishing camera, so it is the
+   * one prop on the map that gets read like a hero asset.
    *
-   * Dark and rough is the point, and `steel_rusted` could not deliver it. Its bare
-   * steel is metalness 1 at roughness 0.19 with a normal map at 1.4, so the dark
-   * tint crushed F0 to 0.017 while the sun still found the microfacet peak on every
-   * flake of that normal map: a black lacquer wedge speckled with blown white
-   * glints, four metres from the establishing camera and the worst surface in the
-   * set. Burnt enamel over iron is a dielectric — F0 pinned at 0.04, no glint to
-   * find — so here the tint darkens a diffuse albedo, which is what "dark" meant,
-   * and the recipe's own chips carry the exposed rust the wreck needs.
+   * IT WAS ONE MASS IN ONE TINT, and that is what this rebuild is against. A
+   * wreck built as a solid sill with a plate floating over it on four posts
+   * measures sd 17 across the whole vehicle: the wheels sit inside the body's own
+   * silhouette so it has no ground contact to read, the greenhouse is an open slot
+   * rather than a dark cabin, and there is no boundary anywhere for the eye to
+   * call a panel. It read as an armoured hull with a barrel, which is a fair
+   * description of what was there.
+   *
+   * Three things fix that and all three are geometry, not texture:
+   *
+   *  - THE SKIN IS PANELS, NOT A BOX. Rocker, wing, two doors and a quarter stand
+   *    9 cm proud of a darker core with 3 cm gaps between them, so every shut line
+   *    is a real self-shadowing recess and the panel boundaries survive to any
+   *    distance the shape does.
+   *  - THE HORIZONTALS ARE A DIFFERENT SUBSTANCE. A car fire takes the paint off
+   *    the bonnet, roof and boot first and leaves pale grey oxide; the flanks keep
+   *    theirs. That is a two-stop value break between the planes that face the sky
+   *    and the planes that face the camera, and it is what stops a dark object in
+   *    shade collapsing into one blob.
+   *  - EDGE WEAR IS CURVATURE-DRIVEN. `edgeWear` lightens the chamfer facets only,
+   *    which is where paint actually goes, so the wear follows the panel edges
+   *    instead of being sprinkled at the recipe's own cell frequency.
+   *
+   * Bare steel stays on the small parts — bumper irons, grille bars, exhaust,
+   * rebar. `steel_rusted` over a whole body was tried and reverted: metalness 1 at
+   * roughness 0.19 under a dark tint crushes F0 to 0.017 while the sun still finds
+   * the microfacet peak on every flake of a 1.4 normal map, i.e. black lacquer
+   * speckled with blown white. On a 12 cm bumper section that same behaviour is
+   * simply the specular event the wreck was missing.
    */
   carHulk(zone, x, z, ry, tint = 0x4e483f) {
     const e = this.bat.zone(zone);
@@ -345,49 +399,96 @@ export class Props {
     const rng = this.rng;
     const base = new THREE.Matrix4().makeRotationY(ry).setPosition(x, this.y, z);
     const M = new THREE.Matrix4();
-    const col = paint(tint, 0.35, 0.85);
-    const put = (g, mat, mm, tt) => e.add(mat, g, mm, { tint: tt ?? col });
     const SHEET = 'iron_painted_chipped';
+    const STEEL = 'steel_rusted';
+    // Retained paint on the flanks; oxide on everything the fire vented through;
+    // soot in the cabin and behind the shut lines. One recipe, three substances.
+    const col = paint(tint, 0.34, 1.05);
+    const oxide = paint(0xb4ac9c, 0.14, 2.15);
+    const soot = paint(0x3b3730, 0.12, 0.42);
+    const rust = paint(0x8c5730, 0.55, 1.15);
+    const iron = paint(0xa9a49c, 0.18, 1.0);
+    // `at` composes in the car's own frame: X across, +Z forward, y from the road.
+    const at = (px, py, pz, rx = 0, rz = 0) => {
+      M.identity();
+      if (rz) M.multiply(new THREE.Matrix4().makeRotationZ(rz));
+      if (rx) M.multiply(new THREE.Matrix4().makeRotationX(rx));
+      M.setPosition(px, py, pz);
+      return M.premultiply(base);
+    };
+    const put = (g, mm, tt, mat) => e.add(mat ?? SHEET, g, mm, { tint: tt ?? col });
+    const worn = (g, gain) => edgeWear(g, gain);
 
-    // Body: sill, floor pan, bonnet, boot, crushed cabin.
-    M.makeTranslation(0, 0.52, 0).premultiply(base);
-    put(k.chamfer(1.76, 0.5, 4.0, 0.06), SHEET, M);
-    M.makeTranslation(0, 0.86, 1.18).premultiply(base);
-    put(k.chamfer(1.66, 0.26, 1.5, 0.05), SHEET, M);
-    M.makeTranslation(0, 0.86, -1.5).premultiply(base);
-    put(k.chamfer(1.66, 0.3, 0.9, 0.05), SHEET, M);
-    // Cabin: A and C pillars plus a roof panel folded down on one side.
-    for (const [sx, sz] of [
-      [-1, 0.42],
-      [1, 0.42],
-      [-1, -1.0],
-      [1, -1.0],
-    ]) {
-      M.makeTranslation(sx * 0.78, 1.12, sz)
-        .multiply(new THREE.Matrix4().makeRotationX(sz > 0 ? 0.32 : -0.16))
-        .premultiply(base);
-      put(k.chamfer(0.12, 0.62, 0.14, 0.02), SHEET, M);
+    // Core: the tub the outer skin hangs on. Dark, and 9 cm narrower each side
+    // than the panels, so every gap between them bottoms out in shadow.
+    put(k.chamfer(1.62, 0.66, 3.62, 0.05), at(0, 0.68, -0.05), soot);
+    // Flank panels. Four pieces a side with 3 cm shut lines between them, each
+    // one a slightly different burnt tone because heat does not stop at a fold.
+    for (const sx of [-1, 1]) {
+      const px = sx * 0.85;
+      put(worn(k.chamfer(0.1, 0.22, 1.78, 0.025), 0.5), at(px, 0.5, -0.05), col.clone().multiplyScalar(0.82));
+      put(worn(k.chamfer(0.11, 0.44, 0.9, 0.03), 0.55), at(px, 0.84, 1.3), col.clone().multiplyScalar(1.06));
+      put(worn(k.chamfer(0.11, 0.5, 0.86, 0.03), 0.55), at(px, 0.8, 0.4), col);
+      put(worn(k.chamfer(0.11, 0.5, 0.84, 0.03), 0.55), at(px, 0.8, -0.51), col.clone().multiplyScalar(0.9));
+      put(worn(k.chamfer(0.11, 0.44, 0.88, 0.03), 0.55), at(px, 0.82, -1.44), sx > 0 ? rust : col.clone().multiplyScalar(0.96));
+      // Arch eyebrows: three short bars over each wheel. Without a lip the tyre
+      // is a black disc pasted on the flank; with one the flank has a hole in it.
+      for (const sz of [1.3, -1.28]) {
+        for (const a of [-0.62, 0, 0.62]) {
+          put(
+            k.chamfer(0.13, 0.07, 0.24, 0.02),
+            at(px + sx * 0.03, 0.36 + Math.cos(a) * 0.5, sz + Math.sin(a) * 0.5, a),
+            col.clone().multiplyScalar(0.88)
+          );
+        }
+      }
     }
-    M.makeTranslation(-0.1, 1.36, -0.3)
-      .multiply(new THREE.Matrix4().makeRotationZ(0.16))
-      .multiply(new THREE.Matrix4().makeRotationX(0.05))
-      .premultiply(base);
-    put(k.chamfer(1.6, 0.08, 1.9, 0.04), SHEET, M);
-    // Arches, bumpers, grille.
-    for (const [sx, sz] of [
-      [-1, 1.32],
-      [1, 1.32],
-      [-1, -1.3],
-      [1, -1.3],
-    ]) {
-      M.makeTranslation(sx * 0.86, 0.62, sz).premultiply(base);
-      put(k.chamfer(0.1, 0.5, 0.86, 0.05), SHEET, M);
+    // Bonnet in two buckled halves and a boot lid: the sky-facing oxide.
+    put(worn(k.chamfer(0.78, 0.07, 1.2, 0.03), 0.4), at(-0.4, 0.99, 1.34, -0.05, 0.07), oxide);
+    put(worn(k.chamfer(0.78, 0.07, 1.16, 0.03), 0.4), at(0.42, 1.03, 1.32, -0.04, -0.14), oxide.clone().multiplyScalar(0.88));
+    put(worn(k.chamfer(1.5, 0.08, 0.82, 0.03), 0.4), at(0, 1.0, -1.66, 0.06), oxide.clone().multiplyScalar(0.94));
+    // Scuttle and rear deck close the gap between skin and glass.
+    put(k.chamfer(1.5, 0.1, 0.22, 0.03), at(0, 1.02, 0.76), soot);
+    put(k.chamfer(1.5, 0.1, 0.2, 0.03), at(0, 1.02, -1.2), soot);
+
+    // Cabin: a dark void with two seat frames in it, so the window apertures are
+    // holes into something rather than a slot through the car.
+    // Inward-facing, so the aperture shows the far side of the room rather than a
+    // black plane 18 cm behind the glass line — and so the seats inside it are
+    // things the eye can find through the window.
+    put(k.box(1.46, 0.66, 1.9, 0, true), at(0, 1.32, -0.26), soot.clone().multiplyScalar(0.5));
+    for (const sx of [-1, 1]) {
+      put(k.chamfer(0.42, 0.5, 0.16, 0.05), at(sx * 0.36, 1.16, -0.5, -0.22), soot.clone().multiplyScalar(1.7));
     }
-    for (const sz of [1, -1]) {
-      M.makeTranslation(0, 0.62, sz * 2.02).premultiply(base);
-      put(k.chamfer(1.7, 0.2, 0.14, 0.04), SHEET, M);
+    // Pillars: A raked forward, B upright, C raked back. Three angles is what
+    // makes a greenhouse read as a greenhouse from a hundred metres.
+    for (const sx of [-1, 1]) {
+      put(worn(k.chamfer(0.1, 0.72, 0.13, 0.02), 0.45), at(sx * 0.72, 1.36, 0.55, 0.42), col.clone().multiplyScalar(0.8));
+      put(worn(k.chamfer(0.09, 0.6, 0.12, 0.02), 0.45), at(sx * 0.79, 1.34, -0.44), col.clone().multiplyScalar(0.8));
+      put(worn(k.chamfer(0.1, 0.62, 0.15, 0.02), 0.45), at(sx * 0.75, 1.34, -1.2, -0.34), col.clone().multiplyScalar(0.8));
+      put(k.chamfer(0.08, 0.08, 1.9, 0.02), at(sx * 0.74, 1.62, -0.35), soot);
     }
-    // Wheels: two burnt to the rim, two deflated.
+    // Roof, pressed in on the near side, with the rear third folded off.
+    put(worn(k.chamfer(1.46, 0.07, 1.5, 0.03), 0.4), at(-0.04, 1.6, -0.5, 0.04, 0.11), oxide.clone().multiplyScalar(0.7));
+    put(worn(k.chamfer(0.86, 0.06, 0.78, 0.03), 0.5), at(0.5, 1.44, 0.42, -0.1, 0.62), oxide.clone().multiplyScalar(0.82));
+
+    // Nose: grille recess, bars, lamp buckets, and the bumper irons front and
+    // rear — the only bare metal on the car, and the only specular event on it.
+    put(k.chamfer(1.56, 0.34, 0.12, 0.03), at(0, 0.72, 1.95), col.clone().multiplyScalar(0.94));
+    put(k.box(1.02, 0.24, 0.06, 0), at(0, 0.74, 1.9), soot.clone().multiplyScalar(0.6));
+    for (let b = 0; b < 3; b++) {
+      put(k.chamfer(1.0, 0.02, 0.03, 0.006), at(0, 0.66 + b * 0.08, 1.93), iron, STEEL);
+    }
+    for (const sx of [-1, 1]) {
+      put(k.cylinder(0.14, 0.15, 0.1, 8), at(sx * 0.56, 0.82, 1.93, Math.PI / 2), soot.clone().multiplyScalar(0.7));
+    }
+    put(k.chamfer(1.68, 0.13, 0.11, 0.03), at(0, 0.54, 2.02), iron, STEEL);
+    // The rear iron has come off one mount and hangs.
+    put(k.chamfer(1.6, 0.12, 0.11, 0.03), at(0.1, 0.42, -2.02, 0.14, 0.34), iron, STEEL);
+    put(k.cylinder(0.036, 0.042, 0.55, 6), at(0.48, 0.28, -1.86, Math.PI / 2), iron, STEEL);
+
+    // Wheels: two burnt to the rim, two deflated. Outboard of the rocker and
+    // proud of it, so the car stands on them instead of hovering over them.
     const tyre = this.set('tyre', 'rubber', () => this.tyreGeo());
     let i = 0;
     for (const [sx, sz] of [
@@ -396,7 +497,7 @@ export class Props {
       [-1, -1.28],
       [1, -1.28],
     ]) {
-      this.P.set(sx * 0.83, 0.3, sz).applyMatrix4(base);
+      this.P.set(sx * 0.86, 0.3, sz).applyMatrix4(base);
       // rz tips the pancake onto its rim so the axle runs along the car's X;
       // one wheel in three is burnt down flat onto it.
       const flat = i++ % 3 === 0;
@@ -408,9 +509,12 @@ export class Props {
     }
     const C = new THREE.Matrix4().makeRotationY(ry).setPosition(x, this.y + 0.75, z);
     e.collide(1.9, 1.5, 4.2, C);
-    // Scorch under and around it: a burnt car leaves a ring on the road.
+    // Scorch: a ring on the road under it, and a second centred on the cabin
+    // rather than on the whole car. Sooting the bonnet as hard as the roof is
+    // what flattened this before — the fire vents upward out of the glass.
     e.scorch(x, this.y + 0.02, z, 3.4, 0.42);
-    e.scorch(x, this.y + 1.1, z, 2.2, 0.3);
+    this.P.set(0, 1.35, -0.4).applyMatrix4(base);
+    e.scorch(this.P.x, this.P.y, this.P.z, 1.75, 0.34);
     for (let j = 0; j < 6; j++) {
       this.P.set(rng.range(-1.4, 1.4), 0.03, rng.range(-2.6, 2.6)).applyMatrix4(base);
       this.place(
@@ -862,7 +966,14 @@ function paint(hex, chroma = 0.6, gain = 1) {
 // Earth: faded, dusty, low-chroma, and multiplying an already-authored PBR albedo
 // raw, so anything saturated turns into a toy. Cloth is the accent exception and
 // exists on purpose. The paint palettes below go through paint() instead.
-const SANDBAG_TINTS = [0x9a917c, 0x877e69, 0xa8a08a, 0x736b5a, 0x8f866f];
+/**
+ * Filled sandbags, spread across two stops rather than a quarter of one. The old
+ * set ran 0x73..0xa8, which over a jute albedo is a 1.4:1 range — invisible
+ * against a wall that lives in shade. Bags come off different pallets, some have
+ * stood a season in the sun and some were filled last week with damp spoil, and
+ * that history is the only per-bag albedo signal there is.
+ */
+const SANDBAG_TINTS = [0xc4bba1, 0xa8a08a, 0x9a917c, 0xb5aa8e, 0x877e69, 0x6b6354, 0xa39476];
 const WOOD_TINTS = [0xc9bda6, 0xb0a48c, 0xd6cbb4, 0x9c9280];
 const DEBRIS_TINTS = [0xb9b3a8, 0xa39c90, 0xc6c0b4, 0x8e887e, 0xada38f];
 /**
@@ -923,6 +1034,82 @@ function compose(x, y, z, sx, sy, sz, rotX = 0) {
   m.scale(new THREE.Vector3(sx, sy, sz));
   m.setPosition(x, y, z);
   return m;
+}
+
+/**
+ * The occlusion a bag gets from the bags around it. See `bagGeo`.
+ *
+ * Coordinates are the bag's own, so the end darkening rotates with a header bag
+ * laid across the wall — which is the point: the dark seam always lands where
+ * this bag meets the next one, not at some world-space azimuth.
+ */
+function bakeBagShade(geo) {
+  const pos = geo.attributes.position.array;
+  const nrm = geo.attributes.normal.array;
+  const n = geo.attributes.position.count;
+  const col = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const px = pos[i * 3];
+    const py = pos[i * 3 + 1];
+    // Belly: the course below takes the sky away over the bottom third.
+    const belly = Math.min(1, Math.max(0, (0.045 - py) / 0.14));
+    // Ends: the neighbours in this course close in over the last 6 cm.
+    const end = Math.min(1, Math.max(0, (Math.abs(px) - 0.13) / 0.09));
+    const crown = Math.max(0, nrm[i * 3 + 1]);
+    const f = (1 - 0.46 * belly * belly) * (1 - 0.3 * end * end) * (1 + 0.13 * crown * crown);
+    col[i * 3] = f;
+    col[i * 3 + 1] = f * 0.995;
+    col[i * 3 + 2] = f * 0.98;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  return geo;
+}
+
+/**
+ * Bare metal on the folds, baked as vertex colour.
+ *
+ * Paint leaves a panel at its edges first — that is where it is thinnest, where
+ * it gets knocked, and where a rag or a sleeve rubs it. A recipe cannot know
+ * this: `iron_painted_chipped` scatters its chips on a cell lattice at its own
+ * texel frequency, which is why the wreck's wear read as random brown blobs that
+ * followed no panel line. On a chamfered piece the fold facets are exactly the
+ * vertices whose normal points at two axes at once, so `1 - max|n|` is a
+ * curvature mask that is free, needs no texture, and lands the wear precisely on
+ * the geometry the eye uses to count panels.
+ *
+ * Warm rather than neutral because what is under the enamel is oxidised iron.
+ * Cached per (geometry, gain): the kit hands out one shared geometry for a given
+ * size and this must not mutate it.
+ */
+const _wearCache = new WeakMap();
+
+function edgeWear(geo, gain = 0.5) {
+  let byGain = _wearCache.get(geo);
+  if (!byGain) _wearCache.set(geo, (byGain = new Map()));
+  const hit = byGain.get(gain);
+  if (hit) return hit;
+  const n = geo.attributes.normal.array;
+  const count = geo.attributes.position.count;
+  const col = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const ax = Math.abs(n[i * 3]);
+    const ay = Math.abs(n[i * 3 + 1]);
+    const az = Math.abs(n[i * 3 + 2]);
+    // 0 on a flat face, 0.29 on a 45-degree fold, 0.42 on a corner facet.
+    const f = 1 + gain * Math.min(1, (1 - Math.max(ax, ay, az)) * 3.6);
+    col[i * 3] = f;
+    col[i * 3 + 1] = f * 0.975;
+    col[i * 3 + 2] = f * 0.93;
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', geo.attributes.position);
+  out.setAttribute('normal', geo.attributes.normal);
+  if (geo.attributes.uv) out.setAttribute('uv', geo.attributes.uv);
+  out.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  out.setIndex(geo.index);
+  out.userData = geo.userData;
+  byGain.set(gain, out);
+  return out;
 }
 
 /**

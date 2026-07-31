@@ -97,6 +97,10 @@ const TILE_MULT = {
   glass_dirty: 1.6,
 };
 
+/** Weathered softwood, for the handful of props Level places directly rather
+ *  than through one of Props' own assemblies. */
+const PALLET_TINTS = [0xc9bda6, 0xb0a48c, 0xd6cbb4, 0x9c9280];
+
 /** Faded plaster and masonry hues. Every building gets its own so the town does
  *  not read as one paint batch. */
 const HUE = {
@@ -1099,6 +1103,187 @@ export class Level {
     this.props.weeds('square', -12, 11, 3, 14);
     this.props.weeds('square', 14, 10, 3, 12);
     this.props.weeds('square', -16, -12, 3, 12);
+
+    this._eastSquare();
+  }
+
+  /**
+   * The square's east quadrant, x 1..10 by z +2..-8.
+   *
+   * THIS QUADRANT WAS BARE and it is not a quadrant anyone can avoid looking at:
+   * it fills the right half of the combat-range pose and the left half of the
+   * close material pose, and in both it measured as 340x160 px of paving at
+   * sd 12 whose only incident was six 20 cm debris chunks too small to read as
+   * objects. The rest of the square is dressed by things that stand *in* it —
+   * stalls, palms, a fountain — and none of that reaches here because the pose
+   * that matters wants a clear field of fire through the middle of it.
+   *
+   * So the dressing is horizontal, not vertical: a kerbed island and its
+   * drainage, a shell crater, a toppled street-light column lying across the
+   * paving, and gully covers flush with the ground. Every one of those breaks the
+   * plane with a silhouette edge and a cast shadow while leaving the sightline
+   * through the square open, which is the constraint the empty quadrant existed
+   * to satisfy in the first place. Scale is the other half of it: a 5 m column
+   * and a 3 m crater are things the eye can measure the square against, and six
+   * 20 cm chunks are not.
+   */
+  _eastSquare() {
+    const e = this.batcher.zone('square');
+    const k = this.kit;
+    const rng = this.rng;
+    const bone = new THREE.Color(HUE.bone);
+
+    // A kerbed planting island. A kerb is the cheapest hard horizontal in a
+    // scene: 16 cm of concrete with a lit top and a shadowed return, running dead
+    // straight across a surface that has no other straight line on it.
+    const ix = 6.4;
+    const iz = -4.4;
+    const iw = 3.0;
+    const id = 3.6;
+    for (const [ox, oz, len, ang] of [
+      [0, id / 2, iw, 0],
+      [0, -id / 2, iw, 0],
+      [-iw / 2, 0, id, Math.PI / 2],
+      [iw / 2, 0, id, Math.PI / 2],
+    ]) {
+      k.kerb(e, new THREE.Matrix4().makeRotationY(ang).setPosition(ix + ox, 0, iz + oz), len, { collide: false, tint: bone });
+    }
+    const IS = new THREE.Matrix4().makeTranslation(ix, 0.1, iz);
+    e.add('dirt_packed', new THREE.PlaneGeometry(iw - 0.3, id - 0.3, 3, 3).rotateX(-Math.PI / 2), IS, { mottle: 0.24, grime: 0 });
+    this.props.weeds('square', ix, iz + 1.2, 1.1, 11, 0.1);
+    this.props.weeds('square', ix - 0.6, iz - 1.4, 0.9, 8, 0.1);
+    this.props.scatterDebris('square', ix, iz, 1.7, 2.3, 14, { y: 0.1, brickRatio: 0.5 });
+    // Grit banks against a kerb from both sides; that is what makes a kerb read
+    // as something the street has been sweeping past for years.
+    for (const [gx, gz, hx, hz] of [
+      [ix, iz + id / 2 + 0.35, 1.6, 0.22],
+      [ix - iw / 2 - 0.35, iz, 0.22, 2.1],
+    ]) {
+      this.props.scatterDebris('square', gx, gz, hx, hz, 16, { brickRatio: 0.55 });
+    }
+    this.props.grassLine('square', ix - iw / 2 - 0.2, iz - id / 2, ix - iw / 2 - 0.2, iz + id / 2, 14, 0.16);
+    this.props.tyres('square', ix + 1.9, iz + 2.4, 3);
+
+    // A mortar crater west of the island: scorched dirt, a lip of thrown rubble,
+    // and two paving slabs stood on edge by the blast.
+    const cx = 2.6;
+    const cz = -5.8;
+    const CR = new THREE.Matrix4().makeRotationY(0.6).setPosition(cx, 0.014, cz);
+    e.add('dirt_packed', new THREE.PlaneGeometry(3.6, 3.2, 3, 3).rotateX(-Math.PI / 2), CR, { mottle: 0.3, mottleScale: 0.12, grime: 0 });
+    e.scorch(cx, 0.05, cz, 3.0, 0.4);
+    k.rubble(e, new THREE.Matrix4().makeTranslation(cx, 0.03, cz), { radius: 1.9, count: 20, rng, collide: false });
+    for (const [sx, sz, tilt, yaw] of [
+      [-1.25, 0.35, 1.05, 0.4],
+      [1.05, -0.7, -0.85, 2.2],
+    ]) {
+      const S = new THREE.Matrix4()
+        .makeRotationY(yaw)
+        .multiply(new THREE.Matrix4().makeRotationX(tilt))
+        .setPosition(cx + sx, 0.36, cz + sz);
+      e.add('concrete_pitted', k.chamfer(1.15, 0.14, 0.95, 0.03), S, { tint: bone });
+      e.collide(1.0, 0.7, 0.6, new THREE.Matrix4().makeTranslation(cx + sx, 0.35, cz + sz));
+    }
+
+    // The street light that used to stand on the island, felled across the paving
+    // and pointing back at the camera. Five metres of continuous silhouette over
+    // a plane whose longest incident was 20 cm.
+    const px0 = 5.6;
+    const pz0 = -1.0;
+    const pang = 2.79;
+    const pdx = Math.cos(pang);
+    const pdz = Math.sin(pang);
+    const shaft = new THREE.Matrix4()
+      .makeRotationY(-Math.atan2(pdz, pdx))
+      .multiply(new THREE.Matrix4().makeRotationZ(Math.PI / 2))
+      .multiply(new THREE.Matrix4().makeRotationX(0.02))
+      .setPosition(px0 + pdx * 2.3, 0.14, pz0 + pdz * 2.3);
+    e.add('concrete_cast', k.cylinder(0.075, 0.115, 4.6, 8), shaft, { tint: bone, keepUV: true, uvScale: [1.5, 2.3] });
+    e.collide(4.4, 0.24, 0.3, new THREE.Matrix4().makeRotationY(-Math.atan2(pdz, pdx)).setPosition(px0 + pdx * 2.3, 0.12, pz0 + pdz * 2.3));
+    // Snapped-off base, still bolted to its plinth, at the other end of the line.
+    e.add('concrete_cast', k.chamfer(0.5, 0.16, 0.5, 0.03), new THREE.Matrix4().makeTranslation(px0, 0.08, pz0), { tint: bone });
+    e.add('concrete_cast', k.cylinder(0.11, 0.14, 0.42, 8), new THREE.Matrix4().makeRotationX(0.14).setPosition(px0, 0.32, pz0), {
+      tint: bone,
+      keepUV: true,
+    });
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * Math.PI * 2;
+      e.add(
+        'steel_rusted',
+        k.cylinder(0.009, 0.009, 0.5, 5),
+        new THREE.Matrix4()
+          .makeRotationZ(0.3 + i * 0.4)
+          .setPosition(px0 + Math.cos(a) * 0.07, 0.56, pz0 + Math.sin(a) * 0.07),
+        { keepUV: true }
+      );
+    }
+    // Lantern head, smashed, at the far end of the shaft.
+    const hx = px0 + pdx * 4.75;
+    const hz = pz0 + pdz * 4.75;
+    const HD = new THREE.Matrix4().makeRotationY(-Math.atan2(pdz, pdx) + 0.5).setPosition(hx, 0.13, hz);
+    e.add('aluminium_scuffed', k.chamfer(0.66, 0.16, 0.36, 0.05), HD, {});
+    e.add('glass_dirty', k.chamfer(0.5, 0.05, 0.28, 0.02), new THREE.Matrix4().makeTranslation(0, -0.1, 0).premultiply(HD), { grime: 0 });
+    e.collide(0.7, 0.26, 0.4, HD);
+    this.props.scatterDebris('square', hx, hz, 0.9, 0.9, 10, { brickRatio: 0.2 });
+
+    // Gully covers, flush. Flat, so they cost nothing in sightline, but a 60 cm
+    // frame of rusted iron in a field of concrete is a hard value edge and the
+    // only specular event on the whole plane.
+    for (const [gx, gz, ga] of [
+      [2.4, 0.2, 0.1],
+      [8.6, -6.9, -0.28],
+      [1.1, -4.2, 0.42],
+    ]) {
+      const G = new THREE.Matrix4().makeRotationY(ga).setPosition(gx, 0.024, gz);
+      e.add('concrete_cast', k.chamfer(0.74, 0.05, 0.62, 0.02), G, { tint: bone });
+      e.add('steel_rusted', k.chamfer(0.56, 0.05, 0.44, 0.012), new THREE.Matrix4().makeTranslation(0, 0.012, 0).premultiply(G), {
+        keepUV: true,
+      });
+      for (let b = 0; b < 4; b++) {
+        e.add(
+          'steel_rusted',
+          k.chamfer(0.5, 0.02, 0.035, 0.006),
+          new THREE.Matrix4().makeTranslation(0, 0.03, -0.15 + b * 0.1).premultiply(G),
+          { keepUV: true }
+        );
+      }
+    }
+
+    // Two low leaning masses to break the horizon of the plane where it meets the
+    // terrace wall, and the clutter that collects in the corner behind them.
+    for (const [lx, lz, la, lt] of [
+      [9.1, 1.9, 0.5, 0.62],
+      [8.4, -7.6, -0.9, -0.55],
+    ]) {
+      const L = new THREE.Matrix4()
+        .makeRotationY(la)
+        .multiply(new THREE.Matrix4().makeRotationX(lt))
+        .setPosition(lx, 0.62, lz);
+      e.add('corrugated_metal', k.chamfer(1.9, 0.05, 1.5, 0.02), L, { tint: new THREE.Color(0xa89e8c) });
+      e.collide(1.8, 1.1, 0.7, new THREE.Matrix4().makeRotationY(la).setPosition(lx, 0.55, lz));
+      this.props.scatterDebris('square', lx, lz, 1.1, 1.1, 9, { brickRatio: 0.5 });
+    }
+    this.props.yardClutter('square', 9.0, -9.4, 1.2, 1.3, 4);
+    this.props.weeds('square', 9.3, -9.9, 1.3, 9);
+
+    // Kerb-hugging spill along the terrace foot, which the square's own scatter
+    // pass treats as open ground because it does not know the wall is there.
+    this.props.grassLine('square', 9.2, -11.5, 9.2, 3.2, 24, 0.22);
+    this.props.scatterDebris('square', 9.0, -4.4, 0.55, 6.5, 26, { brickRatio: 0.6 });
+
+    // And the near ground the close material pose looks across on its left: a
+    // dropped pallet, a broken kerb stone and the brick spill off it, all inside
+    // three metres of that camera so they are read as material, not as clutter.
+    this.props.scatterDebris('square', 2.5, 2.3, 1.5, 1.2, 20, { brickRatio: 0.65 });
+    const KB = new THREE.Matrix4().makeRotationY(0.9).multiply(new THREE.Matrix4().makeRotationZ(0.12)).setPosition(2.2, 0.09, 1.4);
+    e.add('concrete_pitted', k.chamfer(1.05, 0.18, 0.34, 0.03), KB, { tint: bone });
+    e.collide(1.0, 0.2, 0.4, KB);
+    const KB2 = new THREE.Matrix4().makeRotationY(1.4).multiply(new THREE.Matrix4().makeRotationX(0.5)).setPosition(1.5, 0.12, 2.6);
+    e.add('concrete_pitted', k.chamfer(0.62, 0.16, 0.3, 0.03), KB2, { tint: bone });
+    this.props.weeds('square', 2.0, 1.9, 1.0, 8);
+    // Two pallets, the upper one slid off the lower. Things lean on other things.
+    const pallet = this.props.set('pallet', 'wood_plank_weathered', () => this.props.palletGeo());
+    this.props.place(pallet, 3.0, 0.03, 3.9, 0.7, 1, PALLET_TINTS);
+    this.props.place(pallet, 2.6, 0.15, 3.6, 0.55, 1, PALLET_TINTS, { rz: 0.17, rx: 0.06 });
   }
 
   /* -------------------------------------------------------------- distant */

@@ -621,6 +621,13 @@ export class Batcher {
       const sp = src.attributes.position.array;
       const sn = src.attributes.normal.array;
       const su = e.keepUV && src.attributes.uv ? src.attributes.uv.array : null;
+      // A piece may arrive with its own baked vertex colour — edge wear along a
+      // chamfer, a contact gradient up a foot. The merge multiplies it into the
+      // piece tint rather than replacing it, which is the only way relief that
+      // belongs to the *shape* can survive into a merged mesh: nothing
+      // downstream knows a panel from a parapet, and a texture cannot know where
+      // a fold is.
+      const sc2 = src.attributes.color ? src.attributes.color.array : null;
       const count = src.attributes.position.count;
       const m = e.m.elements;
       _ntmp.setFromMatrix4(e.m).invert().transpose();
@@ -691,9 +698,9 @@ export class Batcher {
             f *= 1 - sc[s].s * k * k;
           }
         }
-        col[o3] = e.r * f;
-        col[o3 + 1] = e.g * f;
-        col[o3 + 2] = e.b * f;
+        col[o3] = e.r * f * (sc2 ? sc2[i * 3] : 1);
+        col[o3 + 1] = e.g * f * (sc2 ? sc2[i * 3 + 1] : 1);
+        col[o3 + 2] = e.b * f * (sc2 ? sc2[i * 3 + 2] : 1);
       }
 
       if (src.index) {

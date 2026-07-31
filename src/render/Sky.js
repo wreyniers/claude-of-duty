@@ -142,7 +142,23 @@ const BASE_PARAMS = {
   // near-white wash over the whole upper hemisphere, which is the whole-frame veil
   // the rubric fails post for. Thin enough to read as wisps.
   cirrusDensity: 0.38,
-  aerialDensity: 0.0052,
+  /**
+   * Extinction per metre for the aerial term. 0.0052 is a 192 m e-folding length,
+   * which is dust-storm air, and the airlight it converges on is not a subtle
+   * colour: the horizon in-scatter this preset derives is 0.71 in the renderer's
+   * linear units, brighter than a sunlit plaster wall, while a surface sitting in
+   * shade is near 0.013. At 35 m the old density blended 12.3% of that in, so 88%
+   * of what reached the grade for anything shaded past ~25 m was air — measured, a
+   * four-storey facade at that range printed mean 74.5 / sd 9.0 / saturation 0.047
+   * against mean 24 for the same kind of shade three metres away.
+   *
+   * 0.0034 is a 294 m e-folding, a third less airlight in the 20-50 m band, and it
+   * is deliberately still above the noon preset's 0.0032: a low sun looks through
+   * more aerosol, and the ordering across the presets is the artistic statement.
+   * It cannot go much lower without flattening the distance ramp that is the whole
+   * point of the term — at 200 m this still blends 37%.
+   */
+  aerialDensity: 0.0034,
   aerialHeight: 70,
   aerialGlow: 0.55,
   /**
@@ -622,8 +638,9 @@ uniform vec4 uAerialParams;
 /**
  * Replaces the fog chunk. Two things FogExp2 cannot do and that the eye reads
  * instantly: the haze colour depends on the direction being looked at, so a wall
- * on the sun side hazes warm and one facing away hazes blue; and the density
- * falls off with altitude, so a roofline lifts out of the murk its base sits in.
+ * near the sun's bearing hazes warm and one seen against the zenith hazes blue;
+ * and the density falls off with altitude, so a roofline lifts out of the murk
+ * its base sits in.
  * Contrast is dropped before the tint is applied because distant detail loses
  * local contrast before it takes on the sky's hue.
  */
@@ -641,7 +658,12 @@ const AERIAL_FRAG_BODY = /* glsl */ `
 	float aF = ( 1.0 - exp( -aOd * uAerialParams.x ) ) * uAerialParams.w;
 	vec3 aAir = mix( uAerialHorizon, uAerialZenith, pow( clamp( aDir.y, 0.0, 1.0 ), 0.6 ) );
 	float aCs = max( dot( aDir, uAerialSunDir ), 0.0 );
-	aAir += uAerialSunTint * uAerialParams.z * ( pow( aCs, 7.0 ) * 0.9 + aCs * 0.22 );
+	// Forward lobe only. The aCs * 0.22 floor that used to sit next to it still
+	// carried 14% of the peak glow 45 degrees off the sun, where the g=0.8 Mie
+	// phase this is standing in for is down to 2%, so it was not a lobe at all —
+	// it warmed the entire sun hemisphere out to 90 degrees, and that is the
+	// direction most of a frame shot into a low sun points.
+	aAir += uAerialSunTint * uAerialParams.z * pow( aCs, 7.0 ) * 0.9;
 	float aLum = dot( gl_FragColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
 	gl_FragColor.rgb = mix( gl_FragColor.rgb, vec3( aLum ), aF * 0.3 );
 	gl_FragColor.rgb = mix( gl_FragColor.rgb, aAir, aF );
@@ -676,7 +698,7 @@ export class Sky {
       uAerialHorizon: { value: new THREE.Color(0.5, 0.6, 0.75) },
       uAerialZenith: { value: new THREE.Color(0.25, 0.38, 0.62) },
       uAerialSunTint: { value: new THREE.Color(1, 0.7, 0.42) },
-      uAerialParams: { value: new THREE.Vector4(0.0052, 1 / 70, 0.55, 0.75) },
+      uAerialParams: { value: new THREE.Vector4(0.0034, 1 / 70, 0.55, 0.75) },
     };
 
     // Scratch. update() runs every frame and must not allocate.

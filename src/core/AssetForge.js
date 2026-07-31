@@ -720,7 +720,12 @@ void main() {`
 	// Deliberately unshadowed: the sheet is the thing casting the shadow, and
 	// sampling the cascade again costs more than the term is worth.
 	float macroLit = clamp( ( dot( normalize( vMacroNrm ), uSunDir ) + uBack.y ) / ( 1.0 + uBack.y ), 0.0, 1.0 );
-	float macroThru = clamp( -dot( normal, geometryViewDir ), 0.0, 1.0 );
+	// A step, not a cosine: which side of the sheet the eye is on is a yes-or-no
+	// question, and a cosine answers it with "barely" at exactly the grazing angles
+	// an awning is mostly seen at — the term measured as a 5% lift on a sheet
+	// filling the top third of the frame. If anything the grazing path through the
+	// cloth is longer, so it should not fall off there at all.
+	float macroThru = smoothstep( 0.02, 0.2, -dot( normal, geometryViewDir ) );
 	vec3 totalDiffuse = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse
 		+ diffuseColor.rgb * uSunTint * ( uBack.x * macroLit * macroThru );`
         );

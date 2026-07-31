@@ -574,8 +574,16 @@ export class AssetForge {
         // time-of-day change with no update hook on this material. Irradiance is a
         // plain number and has to be sampled, so a sunrise leaves it a stop stale.
         const sky = this.game.sky;
+        // Transmittance x irradiance / pi: the same Lambert normalisation the direct
+        // term gets, so `amount` means the fraction of what lands on the sheet that
+        // comes out the other side and not an arbitrary gain.
         shader.uniforms.uBack = {
-          value: new THREE.Vector4((thru.amount ?? 0.25) * (sky?.sunIrradiance ?? 3.4), thru.wrap ?? 0.25, 0, 0),
+          value: new THREE.Vector4(
+            ((thru.amount ?? 0.25) * (sky?.sunIrradiance || 3.4)) / Math.PI,
+            thru.wrap ?? 0.25,
+            0,
+            0
+          ),
         };
         shader.uniforms.uSunDir = { value: sky?.sunDirection ?? new THREE.Vector3(0.3, 0.9, 0.2) };
         shader.uniforms.uSunTint = { value: sky?.sunColor ?? new THREE.Color(0xffe9c9) };
@@ -719,13 +727,18 @@ void main() {`
 	// normal for the sun test because the shading normal here is in view space.
 	// Deliberately unshadowed: the sheet is the thing casting the shadow, and
 	// sampling the cascade again costs more than the term is worth.
-	float macroLit = clamp( ( dot( normalize( vMacroNrm ), uSunDir ) + uBack.y ) / ( 1.0 + uBack.y ), 0.0, 1.0 );
-	// A step, not a cosine: which side of the sheet the eye is on is a yes-or-no
-	// question, and a cosine answers it with "barely" at exactly the grazing angles
-	// an awning is mostly seen at — the term measured as a 5% lift on a sheet
-	// filling the top third of the frame. If anything the grazing path through the
-	// cloth is longer, so it should not fall off there at all.
-	float macroThru = smoothstep( 0.02, 0.2, -dot( normal, geometryViewDir ) );
+	// Absolute, because transmission does not care which face the sun landed on —
+	// and on a sagging sheet built as a single surface it lands on whichever one the
+	// normals happen to describe. Keying on the signed cosine left the term reading
+	// zero on an awning filling the top third of the frame, because the face the eye
+	// sees there is the one whose normal points away from the sun.
+	float macroNL = dot( normalize( vMacroNrm ), uSunDir );
+	float macroLit = clamp( ( abs( macroNL ) + uBack.y ) / ( 1.0 + uBack.y ), 0.0, 1.0 );
+	// The eye has to be on the side the sun is *not* on. A step, not a cosine: which
+	// side you are on is a yes-or-no question, and a cosine answers it with "barely"
+	// at exactly the grazing angles an awning is mostly seen at. If anything the
+	// grazing path through the cloth is longer.
+	float macroThru = smoothstep( 0.02, 0.2, dot( normal, geometryViewDir ) * -sign( macroNL ) );
 	vec3 totalDiffuse = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse
 		+ diffuseColor.rgb * uSunTint * ( uBack.x * macroLit * macroThru );`
         );

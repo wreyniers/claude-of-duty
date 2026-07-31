@@ -860,7 +860,7 @@ export const MATERIAL_RECIPES = {
     // transmitted term is most of what the material is for. Not `transmission` on the
     // physical material: that costs a full-scene refraction pass, and a thin opaque
     // weave scatters rather than refracts anyway.
-    translucency: { amount: 0.3, wrap: 0.25 },
+    translucency: { amount: 0.35, wrap: 0.25 },
     // A tarp is slack cloth, not a shelf, and it holds no dust worth modelling.
     dust: false,
     build(b) {

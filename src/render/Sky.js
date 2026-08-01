@@ -198,7 +198,7 @@ const BASE_PARAMS = {
   dustHeight: 7,
   dustLobe: 3.0, // pow() stand-in for a large-particle forward phase function
   dustScale: 1 / 32, // one patch tile per this many metres: street-sized plumes
-  dustLum: 0.065, // fraction of the sun's radiance a dust grain returns
+  dustLum: 0.0, // fraction of the sun's radiance a dust grain returns
   /**
    * How far the dust's own albedo is pulled back to white. Lifted grit is the
    * ground in the air and carries the ground's colour, which is what separates a

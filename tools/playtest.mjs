@@ -234,11 +234,20 @@ const SCENARIOS = [
     async run(pad) {
       const a = await pad.snap();
       await pad.clearEvents();
+      // Sample the whole arc, not one point on it. A frame here retires about
+      // 0.13s of simulation, so a 0.5s jump is four samples and a single reading
+      // taken "shortly after" the press lands after the player already has.
+      let peak = a.player.position[1];
+      let leftGround = false;
       await pad.press('jump');
-      await pad.advance(0.25);
-      const mid = await pad.snap();
-      check(!mid.player.grounded && mid.player.position[1] > a.player.position[1] + 0.15, 'jump leaves the ground', `y+${(mid.player.position[1] - a.player.position[1]).toFixed(2)}`);
-      await pad.advance(1.4);
+      await pad.advance(1.6, async (p) => {
+        const s = await p.snap();
+        peak = Math.max(peak, s.player.position[1]);
+        if (!s.player.grounded) leftGround = true;
+      });
+      const rise = peak - a.player.position[1];
+      check(leftGround, 'jump leaves the ground', leftGround);
+      check(rise > 0.4 && rise < 1.6, 'jump apex is between 0.4m and 1.6m', `${rise.toFixed(2)}m`);
       const end = await pad.snap();
       check(end.player.grounded, 'lands again within 1.65s', `y=${end.player.position[1]}`);
       check(near(end.player.position[1], a.player.position[1], 0.2), 'lands at the height it left from', end.player.position[1]);
@@ -272,11 +281,19 @@ const SCENARIOS = [
       await pad.down('forward', 'sprint');
       await pad.advance(1.6);
       const running = await pad.snap();
+      // Peak, not a point sample: the entry boost decays at ~2.9 m/s and one
+      // frame here is 0.13s of simulation, so a single reading taken after the
+      // slide starts can already be below the speed it started from.
+      let peak = 0;
+      let sawSlide = false;
       await pad.down('crouch');
-      await pad.advance(0.12);
-      const s = await pad.snap();
-      check(s.player.state === 'slide', 'tapping crouch at sprint starts a slide', s.player.state);
-      check(s.player.speed > running.player.speed, 'the slide boosts speed', `${running.player.speed} -> ${s.player.speed}`);
+      await pad.advance(0.5, async (p) => {
+        const s = await p.snap();
+        peak = Math.max(peak, s.player.speed);
+        if (s.player.state === 'slide') sawSlide = true;
+      });
+      check(sawSlide, 'tapping crouch at sprint starts a slide', sawSlide);
+      check(peak > running.player.speed, 'the slide boosts speed', `${running.player.speed} -> peak ${peak.toFixed(2)}`);
       await pad.advance(1.4);
       const after = await pad.snap();
       await pad.up('forward', 'sprint', 'crouch');

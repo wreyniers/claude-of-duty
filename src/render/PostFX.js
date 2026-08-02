@@ -76,6 +76,16 @@ import { MotionBlurShader, VELOCITY_GLSL } from './shaders/MotionBlurShader.js';
  * sun already in it. Bounding how far the wide term can darken (uWideFloor) and
  * fading it out past a few room lengths is what keeps that approximation from
  * reading as dirt on sunlit geometry.
+ *
+ * That bound is also why "the room is still flat" is usually not a bug in here.
+ * A review that finds a ceiling soffit as bright as the floor under it has found
+ * a fill with no orientation in it, and occlusion cannot supply orientation: the
+ * two surfaces can have identical visibility and still owe a stop to each other,
+ * because one faces the sky and one faces the ground. Fix that in the fill
+ * (Lighting's hemisphere, CascadedShadows' uCsmSkyVis) and read this pass again
+ * before deepening it. Raising uStrength or dropping uWideFloor to cover for an
+ * omnidirectional fill buys the darkening at the price of dirt in the corners of
+ * sunlit geometry, and it is unrecoverable once both are wrong at once.
  */
 const AOCompositeShader = {
   name: 'AOCompositeShader',

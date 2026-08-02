@@ -33,16 +33,17 @@ const GROUND_CHROMA = new THREE.Color(1.0, 0.66, 0.4);
  * hold the soffit's original hue while brightening it: r/b 1.26 -> 1.42 for a
  * 1.25x luminance gain, same tree, same pose, 960x540.
  *
- * The hemisphere is a well-shaped term — 1.0 / 0.67 / 0.32 to a floor, a wall and
+ * The hemisphere is a well-shaped term — 1.0 / 0.66 / 0.32 to a floor, a wall and
  * a soffit — but it is only half the fill, and the env map's diffuse half has to
  * agree in sign or the orientation step cancels: see uCsmSkyVis in
  * CascadedShadows, cut in step with this.
  *
  * Trimmed 0.34 -> 0.32 as part of that: the soffit end of the fill is the end that
  * ran furthest away over the last three rounds, and this is the warm half of it.
- * Two hundredths here is worth about 4% on a down-facing surface and nothing at
- * all on a floor, so it buys a little of the orientation step back without
- * re-opening the awning's hue.
+ * Two hundredths is 6% off the hemisphere's contribution to a down-facing surface
+ * and 3% of that surface's total fill, and nothing at all on a floor — a nudge to
+ * the orientation step, not a lever, and small enough not to re-open the awning's
+ * hue. The lever is uCsmSkyVis.
  */
 const GROUND_FRACTION = 0.32;
 

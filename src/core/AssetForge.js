@@ -570,7 +570,14 @@ export class AssetForge {
     const heal = recipe.heal || null;
     const thru = recipe.translucency || null;
 
-    mat.onBeforeCompile = (shader) => {
+    // `function`, not an arrow: Three invokes this as a method on whichever
+    // material is compiling, and every surface in the level is a clone that shares
+    // this one function object (see `material()`). An arrow would close over the
+    // prototype, so the uniform handle published at the bottom would belong to a
+    // material nobody draws — and each clone's compile would overwrite it with
+    // uniforms for a different clone. `forge` carries what the closure needs.
+    const forge = this;
+    mat.onBeforeCompile = function (shader) {
       shader.uniforms.uMacro = { value: new THREE.Vector4(scale, albedoAmt, roughAmt, grime) };
       shader.uniforms.uMacro2 = { value: new THREE.Vector4(patchAmt, patchFreq, runsAmt, runFreq) };
       shader.uniforms.uMacroTint = { value: tint };
@@ -596,7 +603,7 @@ export class AssetForge {
         // The sun's own live objects, shared by reference, so the term follows a
         // time-of-day change with no update hook on this material. Irradiance is a
         // plain number and has to be sampled, so a sunrise leaves it a stop stale.
-        const sky = this.game.sky;
+        const sky = forge.game.sky;
         // Transmittance x irradiance / pi: the same Lambert normalisation the direct
         // term gets, so `amount` means the fraction of what lands on the sheet that
         // comes out the other side and not an arbitrary gain.
@@ -801,7 +808,10 @@ void main() {`
         );
       }
 
-      mat.userData.macroUniforms = shader.uniforms;
+      // On the material actually compiling, not on the prototype the closure was
+      // built around: clones share this function, so `this` is the only handle that
+      // names the right one.
+      this.userData.macroUniforms = shader.uniforms;
     };
     // onBeforeCompile is not part of Three's program cache key, so a patched and
     // an unpatched material with identical parameters would share a program and

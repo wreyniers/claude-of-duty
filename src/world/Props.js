@@ -244,13 +244,14 @@ export class Props {
    * plain capsule: measured in the interior pose at 1.5 m, the silhouette above
    * the shoulder is a smooth arc with no incident on it at all. A gas bottle is
    * recognised by exactly the parts that were missing — the foot ring it stands
-   * on, the boss, the handwheel and the guard hoop over it — and those are also
-   * the only places on it that are bare brass and bare steel rather than enamel.
+   * on, the boss, the handwheel and the guard hoop over it — and all of those sit
+   * where the sky can reach them, which is what makes them read at all.
    *
    * So: everything above the shoulder is now above 0.69, the girth weld the shell
    * is actually made from is a hoop rather than nothing, and the base is a skirt
-   * with a shadow line under it instead of a cylinder meeting the floor. About
-   * 500 triangles on a prop that instances, for a silhouette that reads.
+   * with a shadow line under it instead of a cylinder meeting the floor. 220
+   * triangles becomes about 640, on a prop that instances, for a silhouette that
+   * reads as an object instead of as a pill.
    */
   gasGeo() {
     const k = this.kit;

@@ -73,12 +73,41 @@ import { Props } from './Props.js';
  * became legible as a network — the terrace's retaining wall read as crazy paving,
  * which is the failure its own recipe comment is written to avoid. Dense enough to
  * stay sub-feature is the lesser evil for that one.
+ *
+ * PLASTER IS BACK AT 2.1, AND THAT IS A REVERT, NOT A NEW NUMBER. It was raised
+ * from 2.1 to 3.2 in "Dust the interior floor and break up the plaster scars" for
+ * one stated reason: the peel patches were reading as camouflage. That reason was
+ * then fixed a second time, independently, inside the recipe — `plaster_painted`
+ * now puts its bare substrate only 20 levels under the paint instead of 40,
+ * precisely so the two-tone blob pattern stops reading as camouflage, and its
+ * comment says so. Two corrections for one defect, and the one living here is the
+ * one with the side effect.
+ *
+ * The side effect is measurable. UVs on this level are projected from world
+ * position, so a multiplier of 3.2 against `tile: 3` puts the plaster lattice on a
+ * 94 cm world grid — the same grid, in the same phase, on every wall in the town.
+ * On the interior pose's back wall that is a repeat every 132 px, and the
+ * high-passed vertical autocorrelation of that region peaks at **0.88** at exactly
+ * that lag: the wall is not textured, it is wallpapered, which is the rubric's
+ * named material fail ("tiling repeats visible at a glance"). At 2.1 the lattice
+ * goes to 1.43 m, or a 201 px repeat over a wall that is 270 px tall in frame —
+ * under one and a half periods, which is the point at which the eye stops
+ * pattern-matching. It costs some albedo frequency, and that is affordable
+ * precisely here: `plaster_painted` carries a separate near-field `detail` layer
+ * (freq 8, fading at 6 m) authored to survive being seen from a metre and a half,
+ * and that layer does not scale with this multiplier.
+ *
+ * Knock-on to name honestly, because it is not mine to re-measure: the recipe's
+ * ghost courses are two per tile and its comment costs them at "47 cm at this
+ * level's tiling", which was 3.2. At 2.1 they are 71 cm. A 71 cm course is a
+ * render bay rather than a block, which is a weaker read than intended but not a
+ * wrong one — and it is the smaller error of the two.
  */
 const TILE_MULT = {
   concrete_cast: 1.0,
   concrete_pitted: 3.2,
   brick_red: 2.6,
-  plaster_painted: 3.2,
+  plaster_painted: 2.1,
   tile_ceramic: 1.6,
   asphalt: 2.6,
   dirt_packed: 2.2,

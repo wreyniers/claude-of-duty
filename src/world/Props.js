@@ -121,9 +121,22 @@ export class Props {
     ]);
   }
 
-  /** Shell and hoops on one transform: two draw calls, one drum. */
+  /**
+   * Shell and hoops on one transform: two draw calls, one drum.
+   *
+   * The same `|x5` the wreck's panels take, and for a worse case of the same
+   * arithmetic. An instanced prop keeps the primitive's own 0..1 UVs, so the chip
+   * lattice is stretched over whatever the piece actually measures rather than
+   * over a metre of world: at the level default of 2.2 this shell's 1.81 m
+   * circumference carries 1.1 tiles, which lands the recipe's eleven chip cells
+   * every 15 cm around and 7 cm up. Fifteen centimetres is a quarter of the drum's
+   * diameter — that is not a chip, it is a patch, and it is why the body reads as
+   * spotted rather than worn. At 5 they come to 6.6 by 3.1 cm, which is the size
+   * paint actually leaves a drum, and the hoops stay the prop's only large-scale
+   * material event. Shares the compiled material with the wreck, so no new program.
+   */
   placeDrum(x, y, z, ry, extra) {
-    const body = this.set('drum', 'iron_painted_chipped', () => this.drumGeo());
+    const body = this.set('drum', 'iron_painted_chipped|x5', () => this.drumGeo());
     const hoop = this.set('drum_hoop', 'steel_rusted', () => this.drumHoopGeo());
     const m = this.place(body, x, y, z, ry, 1, DRUM_TINTS, extra);
     // Hashed off the position rather than drawn from the rng: the hoops are a
@@ -220,15 +233,53 @@ export class Props {
     return mergeLocal(parts);
   }
 
-  /** Bottled-gas cylinder — a squat coloured accent in a dust-coloured scene. */
+  /**
+   * Bottled-gas cylinder.
+   *
+   * THE VALVE WAS INSIDE THE DOME. `dome(r)` spans y 0..r from wherever it is
+   * placed, so a 0.16 m cap sitting on a shell whose top is at 0.52 has its apex
+   * at 0.68 — and the neck at 0.555-0.645 and the collar disc at 0.616-0.644 were
+   * both authored as though the shell's top *were* the top of the prop. Every
+   * millimetre of both was buried under the cap. What shipped was therefore a
+   * plain capsule: measured in the interior pose at 1.5 m, the silhouette above
+   * the shoulder is a smooth arc with no incident on it at all. A gas bottle is
+   * recognised by exactly the parts that were missing — the foot ring it stands
+   * on, the boss, the handwheel and the guard hoop over it — and those are also
+   * the only places on it that are bare brass and bare steel rather than enamel.
+   *
+   * So: everything above the shoulder is now above 0.69, the girth weld the shell
+   * is actually made from is a hoop rather than nothing, and the base is a skirt
+   * with a shadow line under it instead of a cylinder meeting the floor. About
+   * 500 triangles on a prop that instances, for a silhouette that reads.
+   */
   gasGeo() {
     const k = this.kit;
-    return mergeLocal([
-      [k.cylinder(0.16, 0.16, 0.52, 12), t(0, 0.26, 0)],
-      [k.dome(0.16, Math.PI / 2, 12, 5), t(0, 0.52, 0)],
-      [k.cylinder(0.055, 0.055, 0.09, 8), t(0, 0.6, 0)],
-      [k.cylinder(0.1, 0.1, 0.028, 8), t(0, 0.63, 0)],
-    ]);
+    const SHOULDER = 0.53;
+    const APEX = SHOULDER + 0.16;
+    const parts = [
+      // Foot skirt: proud of the shell, so the prop lands on a ring and puts a
+      // dark line under itself rather than fading into the floor.
+      [k.cylinder(0.168, 0.172, 0.075, 12), t(0, 0.0375, 0)],
+      [k.cylinder(0.16, 0.16, 0.46, 12), t(0, 0.3, 0)],
+      // The circumferential weld two halves of a shell are joined at. It is the
+      // one horizontal on the body and it catches the sky along its whole length.
+      [k.torus(0.161, 0.0075, 12, 4), rx(0, 0.3, 0)],
+      [k.dome(0.16, Math.PI / 2, 12, 5), t(0, SHOULDER, 0)],
+      // Boss, valve block, handwheel — all clear of the cap this time.
+      [k.cylinder(0.052, 0.062, 0.055, 8), t(0, APEX + 0.02, 0)],
+      [k.chamfer(0.072, 0.062, 0.05, 0.012), t(0, APEX + 0.075, 0)],
+      [k.cylinder(0.012, 0.012, 0.055, 5), new THREE.Matrix4().makeRotationZ(Math.PI / 2).setPosition(0.058, APEX + 0.075, 0)],
+      [k.torus(0.042, 0.011, 10, 4), rx(0, APEX + 0.115, 0)],
+    ];
+    // Guard hoop on three posts. Thin, but it is the only thing on this prop that
+    // breaks the sky above the shoulder, and a broken sky edge is what stops a
+    // cylinder reading as a pill.
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * Math.PI * 2 + 0.4;
+      parts.push([k.cylinder(0.013, 0.015, 0.135, 5), t(Math.cos(a) * 0.104, APEX + 0.045, Math.sin(a) * 0.104)]);
+    }
+    parts.push([k.torus(0.104, 0.014, 12, 4), rx(0, APEX + 0.108, 0)]);
+    return mergeLocal(parts);
   }
 
   /** Air-conditioning unit with a louvred face and a fan hub. Wall furniture is
@@ -895,7 +946,11 @@ export class Props {
     const crate = this.set('crate', 'wood_plank_weathered', () => this.crateGeo(0.62));
     const pallet = this.set('pallet', 'wood_plank_weathered', () => this.palletGeo());
     const jerry = this.set('jerry', 'iron_painted_chipped', () => this.jerryGeo());
-    const gas = this.set('gas', 'iron_painted_chipped', () => this.gasGeo());
+    // See placeDrum: this shell is 1.0 m around, so the default density puts the
+    // chip cells at 8.3 by 3.8 cm on a bottle 32 cm across. In the interior pose,
+    // at a metre and a half, they read as four pale stickers with a rimmed edge —
+    // the loudest thing on the prop and the wrong thing entirely.
+    const gas = this.set('gas', 'iron_painted_chipped|x5', () => this.gasGeo());
     const dirx = Math.cos(ry);
     const dirz = -Math.sin(ry);
     for (let i = 0; i < n; i++) {
@@ -1020,7 +1075,19 @@ const HOOP_TINTS = [paint(0xb9bcbe, 0.22, 1.15), paint(0x8f6a4a, 0.5, 0.95), pai
 const DRUM_SEG = 14;
 const DRUM_HOOP_Y = [0.031, 0.28, 0.6, 0.868];
 const JERRY_TINTS = [0x4d5340, 0x565b46, 0x6a5b3c].map((h) => paint(h, 0.5, 1.3));
-const GAS_TINTS = [0xa8531f, 0x2f5566, 0x8b8474].map((h) => paint(h, 0.7, 1.5));
+/**
+ * Bottled gas. Measured in the interior pose, the standing bottle came back at
+ * rgb(155,175,139) — luminance 168 — against a floor 40 cm away from it at 49 and
+ * the wall behind it at 35. Same room, same two light sources, so a 3.4:1 against
+ * the surface it is standing on is albedo, not lighting: gain 1.5 over an enamel
+ * the recipe already authored bright enough for a painted prop, and chroma 0.7 on
+ * a hue that normalises green-heavy. In a shelled room with no other saturated
+ * object in it, that is a mint pill, and the eye goes to it before it goes to the
+ * doorway. 1.12 puts it just above the enamel rather than a stop and a half over
+ * it, and 0.42 keeps the hue legible as bottled-gas livery without letting it be
+ * the most saturated thing in the frame.
+ */
+const GAS_TINTS = [0xa8531f, 0x2f5566, 0x8b8474].map((h) => paint(h, 0.42, 1.12));
 // Rubber's own albedo is already the 0.01-0.03 a tyre has; these only age it, and
 // the bleached entry is the one that goes up rather than all three going down.
 const TYRE_TINTS = [paint(0x2c2a28, 0.4, 0.95), paint(0x35322f, 0.45, 1.35), paint(0x232120, 0.35, 0.85)];

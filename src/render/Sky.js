@@ -118,8 +118,24 @@ const BASE_PARAMS = {
    * to rgb(162,190,204). The sky is now about a third of a stop under a sunlit
    * plaster wall rather than level with it, which is where a photograph exposed
    * for the sunlit subject puts it.
+   *
+   * 0.048 kept that promise only while the sunlit wall was where it was measured.
+   * It is not: three rounds of fill escalation left the key light so far under its
+   * own sky that a sunlit facade in `vista` printed 180 while the sun-side sky
+   * printed 220.7 at 0.028 saturation — literally the achromatic patch the review
+   * measured, and achromatic for the reason this comment already names, which is
+   * that the band is sitting where a doubling is worth ten codes. Two things move
+   * to close it and they move toward each other: KEY_BOOST in Lighting takes the
+   * sunlit wall up about half a stop, and this takes the dome down a third of one.
+   * Modelled on the CPU against the real grade path, sun-side horizon 229.3 ->
+   * 222.1 at saturation 0.039 -> 0.047, and the blue band 60 degrees off the sun
+   * 196.8 -> 182.0 at 0.210 -> 0.267. The dome losing a fifth of its radiance is
+   * also a fifth off every fill term keyed to it — `ambientIntensity` and the
+   * PMREM both — which is the direction this round needs and is accounted for in
+   * Lighting's iblFillFactor and CascadedShadows' uCsmSkyVis rather than left to
+   * land by accident.
    */
-  lum: 0.048,
+  lum: 0.038,
   sunLum: 190, // sun disc radiance: far above 1 so PostFX's bloom has an HDR source
   glow: 0.45, // extra narrow Mie aureole around the disc
   nightLum: 0.6,

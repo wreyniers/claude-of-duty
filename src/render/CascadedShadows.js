@@ -133,27 +133,34 @@ export class CascadedShadows {
        * on the only half that was never the problem, and it is the only lever in
        * this renderer that can brighten shade without touching a highlight.
        *
-       * Both figures went up again after four of five captures graded 1.5-2 stops
-       * under. The soffit term moved most, 0.45 -> 1.15, for two reasons. It was
-       * the worst of the underexposure — an awning underside at rgb(33,32,27), an
-       * interior ceiling at 44.8 — because 0.45 reads a soffit as though the ground
-       * below it were as dark as the sky above is bright, which under a low sun
-       * over pale paving it is not. And it is the *cool* way to light a soffit:
-       * Lighting's hemisphere can deliver the same photons but only in the warm
-       * bounce chroma, and buying the lift there instead turned an olive awning
-       * orange (r/b 2.4 against 1.26). Lit from here the same surface comes out
-       * 1.25x brighter at r/b 1.42.
+       * Both figures then went up twice more, 0.45/1.38 -> 0.72/1.95 -> 1.15/1.95,
+       * each time against a capture that graded under. The lift was real and the
+       * ratio was the casualty: this pair is the only orientation term in the whole
+       * fill, and raising its *floor* five and a half times while its ceiling rose
+       * 1.4x took the step it delivers from 3.1:1 to 1.7:1 — which is the same
+       * mistake as adding ambient, made one uniform further in. The review measured
+       * the result exactly where this uniform lives: a sunlit minaret at 90 m
+       * varying 6% across its whole width, a gabion's top and front differing 17%
+       * where a sky hemisphere owes about a stop.
        *
-       * Net of envFillScale a sky-facing surface now takes 1.25 of the dome's
-       * diffuse irradiance and a soffit 0.74, against 0.88 and 0.29. Past-unit on
-       * the open end is the bounce off the sunlit facades that the dome cube does
-       * not contain. The step between the two orientations narrows from 3.1:1 to
-       * 1.7:1 here, but the hemisphere still runs 2.9:1 across the same two
-       * orientations, so the combined fill keeps a ~2.2:1 read — about a stop
-       * between a floor and a soffit, which is what a walled square with a bright
-       * floor actually delivers.
+       * Back to 0.47/1.35, within a few percent of the 0.45/1.38 the pair held
+       * before the escalation and now derived rather than restored. Against Sky's
+       * recalibrated dome and net of envFillScale, a sky-facing surface takes 0.86
+       * of the dome's diffuse irradiance and a soffit 0.30; with the hemisphere
+       * added the combined fill runs 1.20 / 0.64 / 0.36 to a floor, a wall and a
+       * soffit. That is 3.4:1 across the two extremes — one and three quarter
+       * stops, and the terminator on the minaret comes back with it.
+       *
+       * What made 0.45 look wrong the first time was an awning underside at
+       * rgb(33,32,27) — but that was read in a frame whose *sunlit* surfaces were
+       * also under, so the whole judgement was made without a reference white. With
+       * KEY_BOOST at 3.3 the ground under that awning is half a stop brighter than
+       * it was, and a soffit that reads two and a half stops below it is a soffit,
+       * not an error. This end of the term still stays past what a pure dome would
+       * give (a soffit sees no sky at all), because the bounce off sunlit paving is
+       * real and the cube does not contain it.
        */
-      uCsmSkyVis: { value: new THREE.Vector3(1.15, 1.95, 3.2) },
+      uCsmSkyVis: { value: new THREE.Vector3(0.47, 1.35, 3.2) },
       uCsmDebug: { value: 0 },
     };
 

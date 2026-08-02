@@ -386,8 +386,9 @@ const LightShaftShader = {
     uAureole: { value: 0.08 },
     // Scene-referred radiance either side of the bright-pass ramp: below x a
     // surface is lit by fill and cannot be a source, above y it is standing in
-    // direct sun. Shaded interior plaster measures ~0.02 here, a sunlit patch on
-    // the same wall ~0.5, open sky ~1.2.
+    // direct sun. These are absolute radiances, so they only mean "in sun" for as
+    // long as the key that puts a surface there stays put — see _shaftBright,
+    // which is re-derived whenever Lighting's key moves.
     uBright: { value: null },
     uSeed: { value: 0 },
   },
@@ -856,7 +857,21 @@ export class PostFX {
     this._sunClip = new THREE.Vector4();
     this._camPlanes = new THREE.Vector2(0.08, 900);
     this._aoFade = new THREE.Vector2(90, 260);
-    this._shaftBright = new THREE.Vector2(0.18, 0.5);
+    /**
+     * The shaft mask's bright pass, in scene-referred radiance: below x the pixel
+     * is lit by fill and cannot be a source of a beam, above y it is standing in
+     * direct sun.
+     *
+     * 0.18/0.5 was measured against a key that has since gone up 1.71x and a fill
+     * that has come down to between 0.44 and 0.66 of itself, which moves both ends
+     * of the population this ramp sits between — a sunlit facade from ~0.34 to
+     * ~0.51, a shaded one from ~0.10 to ~0.06. Left where it was, the ramp's foot
+     * would sit in the middle of the *shaded* distribution instead of below it, and
+     * a mask that fires on shade is not a mask: the term stops being beams and
+     * becomes the whole-frame veil the post axis fails for. Scaled with the light
+     * it is measuring rather than re-guessed.
+     */
+    this._shaftBright = new THREE.Vector2(0.26, 0.72);
 
     this._projClean = new THREE.Matrix4();
     this._viewProjClean = new THREE.Matrix4();

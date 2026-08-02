@@ -33,12 +33,18 @@ const GROUND_CHROMA = new THREE.Color(1.0, 0.66, 0.4);
  * hold the soffit's original hue while brightening it: r/b 1.26 -> 1.42 for a
  * 1.25x luminance gain, same tree, same pose, 960x540.
  *
- * The hemisphere is a well-shaped term — 1.0 / 0.67 / 0.34 to a floor, a wall and
+ * The hemisphere is a well-shaped term — 1.0 / 0.67 / 0.32 to a floor, a wall and
  * a soffit — but it is only half the fill, and the env map's diffuse half has to
  * agree in sign or the orientation step cancels: see uCsmSkyVis in
- * CascadedShadows, raised in step with this.
+ * CascadedShadows, cut in step with this.
+ *
+ * Trimmed 0.34 -> 0.32 as part of that: the soffit end of the fill is the end that
+ * ran furthest away over the last three rounds, and this is the warm half of it.
+ * Two hundredths here is worth about 4% on a down-facing surface and nothing at
+ * all on a floor, so it buys a little of the orientation step back without
+ * re-opening the awning's hue.
  */
-const GROUND_FRACTION = 0.34;
+const GROUND_FRACTION = 0.32;
 
 /**
  * How far the hemisphere's *sky* half is pulled off the warm bounce back toward
@@ -68,24 +74,34 @@ const SKY_MIX = 0.52;
  * The key is Sky's `sunIrradiance` times this.
  *
  * Sky derives that figure for the dome, and the dome's radiance scale (`lum`) was
- * recalibrated down by two thirds to land the horizon band on the part of the ACES
- * curve that still has slope. The sun constant did not move with it, so the key
- * drifted down against its own sky.
+ * recalibrated down to land the horizon band on the part of the ACES curve that
+ * still has slope. The sun constant did not move with it, so the key drifted down
+ * against its own sky.
  *
- * This is deliberately a small part of the contrast fix. Sunlit high-albedo
- * plaster already sits near 200 in the graded frame, so buying key-to-fill by
- * raising the key clips the brightest surfaces in the level and costs the tone
- * axis; the room is all on the shade side.
+ * It then drifted a great deal further. Three consecutive rounds each read the
+ * frame as under-exposed and each answered on the fill side — iblFillFactor 0.265
+ * -> 1.18 -> 2.4 -> 2.25, uCsmSkyVis 0.21/0.62 -> 0.45/1.38 -> 0.72/1.95 ->
+ * 1.15/1.95, envFillScale 0.32 -> 0.64 — while this one was *trimmed* 2.05 ->
+ * 1.93 to stop the top of the curve blowing. Net over the three: about eight
+ * times the fill against 0.94 of the key. That is where the missing three stops
+ * went, and the review measured what is left: key-to-fill 2.3:1, a lit cylinder
+ * with no terminator, a gabion whose top and front differ by 17%.
  *
- * Trimmed 6% from 2.05 now that the fill below carries 1.7-2.4x more. That trim
- * is nearly free at the top of the curve and not free at all in the middle: ACES
- * is compressive enough past display 200 that 6% of scene-linear is two or three
- * codes on the sunlit plaster in `vista` (the one pose that was already exposed
- * correctly, and the one this must not blow), while it holds the key:fill ratio
- * that separates a lit facade from a shaded one now that the shaded one is no
- * longer 1.5 stops under.
+ * So the correction is on this side this time, and it is the larger half of it.
+ * With the fill cut below and in uCsmSkyVis, a surface square to the sun now
+ * takes 8.6 of accumulated irradiance against 0.64 of fill — 13.5:1, three and
+ * three quarter stops, inside the 8-16:1 the golden hour actually delivers and up
+ * from the 4.4:1 the same arithmetic gives at 1.93.
+ *
+ * The old worry that raising the key clips the brightest surfaces was measured
+ * against a frame where a sunlit facade printed 180 and the sky above it 220.7.
+ * At 3.3 that facade lands near 203 and the sky, a fifth dimmer for Sky's own
+ * recalibration, near 222 — the subject finally exposed level with its own sky
+ * instead of two thirds of a stop under it, with the shoulder still ahead of it.
+ * The one number that must not move up with it is the fill, or all of this is
+ * spent buying back the flatness it was meant to remove.
  */
-const KEY_BOOST = 1.93;
+const KEY_BOOST = 3.3;
 
 /**
  * Sun, cascaded shadow maps, and the local light budget.
@@ -153,9 +169,19 @@ export class Lighting {
      * 40.1; at 320x180 on the `silhouette` pose, shade facade 55.7 -> 83.3, lit
      * facade 83.7 -> 105.1, paving 53.3 -> 70.6.
      *
-     * Fill stays close to free at the top of the histogram: at ~30:1 key-to-fill
-     * on sunlit paving a 1.75x fill adds about 2% to the lit surface and 75% to
-     * the shade it is read against.
+     * Each of those readings was true and the sum of them was wrong: "fill is
+     * close to free at the top of the histogram" holds one round at a time and
+     * stops holding when three rounds in a row spend it, which is how the fill
+     * ended up outrunning the key. The multiplier stays at 2.25 and the *light*
+     * still comes down, because Sky's lum recalibration takes `ambientIntensity`
+     * from 0.401 to about 0.318: the hemisphere's own output falls 0.90 -> 0.72
+     * without this number moving. Read the absolute, not the multiplier — the
+     * absolute is what the key is measured against.
+     *
+     * The rest of the cut is in uCsmSkyVis, deliberately, because that is the term
+     * that has *orientation* in it. Taking it here instead would scale a soffit
+     * and a floor by the same factor and leave the frame just as omnidirectional,
+     * only dimmer, which is the one failure this round cannot repeat.
      */
     this.iblFillFactor = 2.25;
     /**

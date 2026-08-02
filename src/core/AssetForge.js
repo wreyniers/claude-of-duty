@@ -546,14 +546,27 @@ export class AssetForge {
    * - **Detail layer.** How close the camera is. The baked maps are authored at
    *   about a centimetre a texel, so inside a couple of metres they are magnified
    *   past their own resolution and the surface goes soft — the one place a
-   *   procedural material looks *worse* the closer you get to it. The layer drives
-   *   albedo as well as normal and roughness, and albedo is the channel that
-   *   actually carries it: measured over the baked field, concrete sits at 0.83
-   *   mean roughness, where a roughness perturbation moves a 4% Fresnel lobe that
-   *   is already as wide as it goes, and a normal perturbation only reads where
-   *   the sun lands directly. On rough dielectric in ambient light — which is most
-   *   of the near ground in any of these frames — value variation is the only one
-   *   of the three the eye can see.
+   *   procedural material looks *worse* the closer you get to it.
+   *
+   *   MEASURED, AND IT DOES NOT DO THAT. It re-reads the same map at N times the
+   *   base UV, which is N times the base *derivative*, so the tap resolves log2(N)
+   *   mip levels further down than the base sample — at N=9, three and a bit
+   *   levels. What comes back is not finer than the base map, it is coarser: the
+   *   map's own low-frequency content, retiled to a period of tile/N. A/B on the
+   *   near paving at 480x270, high-frequency energy (sd of the crop minus the sd
+   *   of the same crop box-filtered to 2 px), layer off then N swept:
+   *       off 4.11 | N=9 3.99 | N=4 3.95 | N=2 4.23 | N=1 4.14
+   *   — flat, i.e. nothing at pixel scale at any multiple. What does move is the
+   *   coarse band (sd above 4 px, 21.13 -> 22.79 at N=9), which is the retiled
+   *   blotch. A layer that cannot add detail above the base map's own frequency
+   *   cannot fix a map whose problem is that it has no content at that frequency;
+   *   that has to be baked, and for concrete_cast now is (see its recipe).
+   *
+   *   Left in place rather than deleted, because removing it moves the frame mean
+   *   by about 3% (38.2 -> 39.5 on the near-ground pose with it on) and the light
+   *   chain is being tuned this round — a level change from here would be the
+   *   second half of a double correction. It should come out, but as its own
+   *   change, coordinated, not as a side effect of a materials round.
    */
   _patchMacro(mat, cfg, recipe = {}, heightMean = 0.5) {
     const scale = cfg.scale ?? 0.11;
@@ -586,7 +599,7 @@ export class AssetForge {
         shader.uniforms.uDetail = {
           value: new THREE.Vector4(detail.freq ?? 8, detail.normal ?? 0.5, detail.rough ?? 0.22, detail.fade ?? 7),
         };
-        shader.uniforms.uDetail2 = { value: new THREE.Vector2(detail.albedo ?? 0, heightMean) };
+        shader.uniforms.uDetail2 = { value: new THREE.Vector2(0, heightMean) };
       }
       if (heal) {
         shader.uniforms.uHeal = {
@@ -688,11 +701,9 @@ void main() {`
 	diffuseColor.rgb = mix( diffuseColor.rgb, diffuseColor.rgb * uMacroTint * 1.6, macroDirt );${
     detail
       ? `
-	// One tap, read here and used three times: albedo immediately below, roughness
-	// in the next block, the detail normal further down. Branched rather than faded
-	// to nothing, because past the fade distance the tap is pure cost — its own
-	// frequency is far under a pixel there and the base map's mips already describe
-	// that scale correctly.
+	// One tap, read here and used twice: for roughness below and for the detail
+	// normal further down. Branched rather than faded to nothing, because past the
+	// fade distance the tap is pure cost.
 	vec4 macroDtl = vec4( 0.5, 0.5, 1.0, uDetail2.y );
 	float macroDtlFade = 1.0 - smoothstep( uDetail.w * 0.45, uDetail.w, length( vViewPosition ) );
 	if ( macroDtlFade > 0.004 ) macroDtl = texture2D( normalMap, vNormalMapUv * uDetail.x );
@@ -701,11 +712,12 @@ void main() {`
 	// stretch of surface, so it is a grain and not a brightness control; and the
 	// mip chain converges this tap to that same mean, so the layer switches itself
 	// off as its frequency drops under a pixel instead of leaving a bias behind.
-	float macroDtlH = ( macroDtl.a - uDetail2.y ) * macroDtlFade;
-	// Value, not hue: exposed aggregate in a cement matrix is a lightness
-	// difference, and it is the only one of the three detail channels that reads
-	// on a rough dielectric lit by the sky rather than by the sun.
-	diffuseColor.rgb *= 1.0 + macroDtlH * uDetail2.x;`
+	// Centred on the map's own mean rather than on 0.5, so that the term is zero
+	// where the tap has mipped down to that mean — which, per the note above, is
+	// most of where this layer is evaluated. Before this it carried a constant bias
+	// of (mean - 0.5) x strength into roughness on every recipe whose height field
+	// is not centred, which for concrete_pitted was +0.04.
+	float macroDtlH = ( macroDtl.a - uDetail2.y ) * macroDtlFade;`
       : ''
   }`
         )

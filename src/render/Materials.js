@@ -24,7 +24,7 @@ import { clamp01, smoothstep } from './Noise.js';
  *   physical    use MeshPhysicalMaterial (cloth sheen, glass)
  *   mat         extra material parameters
  *   macro       world-space large-scale variation (false disables)
- *   detail      near-field second albedo/normal/roughness layer at N x the base UV
+ *   detail      second normal/roughness layer at N x the base UV (see AssetForge)
  *   heal        world-space gate for the damage this recipe writes to b.damage
  *   dust        strength of the up-facing dust film (false disables)
  *   translucency thin-surface transmission for a sheet the sun gets through
@@ -105,15 +105,11 @@ export const MATERIAL_RECIPES = {
     // 2.5 m a tile the base map is about a centimetre a texel, which is five
     // screen pixels of the same value at knee height.
     //
-    // `albedo` is the number that made this layer visible. Measured over the baked
-    // field, this recipe's albedo luminance has sd 11.6 in 8-bit, of which 9.9
-    // survives an eight-texel box — i.e. almost all of its variation is above
-    // 8 cm and there is nothing at all below it, which is precisely the "soft
-    // cloudy mottle, no high-frequency content" the near ground was failing on.
-    // Normal and roughness could not fix that: this surface bakes at 0.83 mean
-    // roughness, where the specular lobe is already as wide as it goes.
-    // 0.65 against a height sd of 0.105 is about 9 levels of grain at 1 mm scale.
-    detail: { freq: 9, normal: 0.5, rough: 0.2, albedo: 0.65, fade: 10 },
+    // No `albedo` here, and the multiplier is back at 9 rather than raised: see the
+    // measurement recorded on the detail layer in AssetForge. This layer cannot
+    // deliver near-field grain on this surface, and the near-field grain is instead
+    // baked below, where it lands.
+    detail: { freq: 9, normal: 0.5, rough: 0.2, fade: 7 },
     build(b) {
       // gain above 0.5 deliberately: a mathematically clean fBm spectrum reads as
       // soft cloud at texture scale, and cement grain is not soft.
@@ -129,6 +125,14 @@ export const MATERIAL_RECIPES = {
       // gates which cells got a bug hole and how big it is.
       const voidId = b.cells({ freq: 22, jitter: 1, mode: 'id', seed: 707 });
       const agg = b.cells({ freq: 38, mode: 'id', seed: 1301 });
+      // Cement grain at the texel. freq 96 on a 256 map is 2.7 texels a cycle, and
+      // at the 2.5 m tile the level gives this recipe that is a 26 mm feature — one
+      // to two screen pixels at the range the camera stands on it. Nothing else in
+      // this recipe lives at that scale: `grain` is freq 12 (21 texels) and the
+      // aggregate is freq 38 (6.7). The near-field detail layer was supposed to
+      // supply this band and cannot — see the measurement in AssetForge — so it is
+      // baked, where the mip chain can still take it away again at distance.
+      const fines = b.fbm({ freq: 96, octaves: 2, gain: 0.5, seed: 6607 });
       const base = lin(0x9a9389);
       const wet = lin(0x4e4a41);
       const pale = lin(0xb7b0a0);
@@ -159,18 +163,29 @@ export const MATERIAL_RECIPES = {
         const stain = clamp01(damp[i] * 1.5 - 0.35);
         b.height[i] = 0.62 + (g - 0.5) * 0.34 - pit * 0.55 - kerf * 0.52 - shoulder * 0.07;
         let c = mixc(base, wet, stain * 0.7);
-        // Exposed sand grains: only on the parts the cement skin has worn off, and
-        // only in the top eighth of the cell field. At the density this recipe is
-        // tiled at on the square — a metre of paving per 85 texels — a wider gate
-        // put a bright grain every 8 cm across the largest surface in the frame,
-        // and forty metres of that reads as television static rather than as
-        // concrete. Same reason the grain's own albedo swing is halved: the
-        // mid-scale patch term in the macro shader is what should carry the
-        // variation here, because it is the one that does not repeat.
-        c = mixc(c, pale, agg[i] > 0.88 ? (agg[i] - 0.88) * 2.4 * smoothstep(0.45, 0.85, g) : 0);
+        // Exposed sand grains. The gate is wide (a third of the cell field, not an
+        // eighth) and the contrast per grain is low, which is the opposite way round
+        // from how this was written before: a narrow gate with a bright ramp puts a
+        // few loud specks on the surface, and a few loud specks at forty metres are
+        // what reads as television static. Many quiet ones average back to the
+        // surface's own colour in the mips and cost nothing at distance. Measured
+        // over the baked field, this plus the fines above moved the albedo luminance
+        // sd like this (8-bit, at the 256 map this bakes to, 1 texel = 1 cm):
+        //     total     11.64 -> 12.13
+        //     above 2 texels (the distant read)   11.34 -> 11.72
+        //     above 8 texels (the whole-frame read) 9.95 -> 10.04
+        // i.e. energy below 2 texels — which is 1 to 2 screen pixels at the range
+        // the camera stands on this — up 19%, and the band that survives to forty
+        // metres up under 1%. That is the trade the "television static" note was
+        // reaching for and did not get: it is the *ratio* of speck contrast to speck
+        // count that aliases, not the amount of grain.
+        c = mixc(c, pale, agg[i] > 0.66 ? (agg[i] - 0.66) * 1.15 * smoothstep(0.4, 0.85, g) : 0);
         c = mixc(c, grimy, pit * 0.55 + kerf * 0.6);
         b.rgb(i, ...c);
-        b.scale(i, (0.91 + g * 0.19) * bayTone);
+        // The fines ride on the value scale rather than on the hue, for the same
+        // reason the bay tone does: cement is one colour and a difference in how
+        // much of it came up under the float is a lightness difference.
+        b.scale(i, (0.91 + g * 0.19) * bayTone * (0.89 + fines[i] * 0.22));
         // Traffic and rain polish the raised, exposed parts; the recessed
         // laitance dust and the air voids stay chalky. A joint's shoulder is the
         // most walked-over line on a slab and polishes hardest, and the kerf under
@@ -187,7 +202,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 3,
     normalScale: 1.5,
     macro: { scale: 0.06, albedo: 0.17, rough: 0.15, grime: 0.3, patch: 0.14, patchFreq: 0.3, runs: 0.45, runFreq: 1.3 },
-    detail: { freq: 9, normal: 0.55, rough: 0.24, albedo: 0.5, fade: 9 },
+    detail: { freq: 9, normal: 0.55, rough: 0.24, fade: 7 },
     // Every mask in a tiling texture tiles, including the one that exists to make
     // the damage regional — and the level tiles this recipe at 3.2x, so one tile is
     // 78 cm and *any* in-tile gate is a motif that repeats five times across a
@@ -311,7 +326,7 @@ export const MATERIAL_RECIPES = {
     // Limewash over plaster is genuinely smooth, so what the near field wants back
     // is the trowel stipple, not aggregate — but it wants it at a strength that
     // survives being a metre and a half away.
-    detail: { freq: 8, normal: 0.5, rough: 0.18, albedo: 0.35, fade: 8 },
+    detail: { freq: 8, normal: 0.5, rough: 0.18, fade: 6 },
     build(b) {
       const trowel = b.warp(b.fbm({ freq: 5, octaves: 4 }), { freq: 2, amount: b.size * 0.11 });
       const stipple = b.fbm({ freq: 40, octaves: 2, seed: 71 });
@@ -493,7 +508,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 3,
     normalScale: 1.15,
     macro: { scale: 0.04, albedo: 0.18, rough: 0.18, grime: 0.16, tint: 0x6a6558, patch: 0.17, patchFreq: 0.26, runs: 0.2 },
-    detail: { freq: 10, normal: 0.5, rough: 0.2, albedo: 0.5, fade: 10 },
+    detail: { freq: 10, normal: 0.5, rough: 0.2, fade: 7 },
     build(b) {
       const aggId = b.cells({ freq: 30, mode: 'id', seed: 3 });
       const aggH = b.cells({ freq: 30, mode: 'dome', jitter: 1, seed: 3 });
@@ -527,7 +542,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 3,
     normalScale: 1.0,
     macro: { scale: 0.05, albedo: 0.18, rough: 0.1, grime: 0.1, patch: 0.17, patchFreq: 0.3, runs: 0.15 },
-    detail: { freq: 9, normal: 0.45, rough: 0.18, albedo: 0.45, fade: 8 },
+    detail: { freq: 9, normal: 0.45, rough: 0.18, fade: 6 },
     build(b) {
       const clods = b.cells({ freq: 15, mode: 'dome', jitter: 1, seed: 7 });
       const grit = b.fbm({ freq: 30, octaves: 3, seed: 8 });
@@ -560,7 +575,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 3,
     normalScale: 1.7,
     macro: { scale: 0.06, albedo: 0.14, rough: 0.08, grime: 0.12, patch: 0.17, patchFreq: 0.8, runs: 0.32, runFreq: 1.9 },
-    detail: { freq: 8, normal: 0.4, rough: 0.16, albedo: 0.3, fade: 6 },
+    detail: { freq: 8, normal: 0.4, rough: 0.16, fade: 5 },
     build(b) {
       const dome = b.cells({ freq: 13, mode: 'dome', jitter: 1, seed: 31 });
       const sid = b.cells({ freq: 13, mode: 'id', jitter: 1, seed: 31 });
@@ -593,7 +608,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 4,
     normalScale: 0.8,
     macro: { scale: 0.07, albedo: 0.11, rough: 0.07, grime: 0.06, patch: 0.14, patchFreq: 0.22, runs: 0.1 },
-    detail: { freq: 12, normal: 0.35, rough: 0.12, albedo: 0.35, fade: 8 },
+    detail: { freq: 12, normal: 0.35, rough: 0.12, fade: 5 },
     build(b) {
       const drift = b.fbm({ freq: 3, octaves: 4, seed: 19 });
       const grain = b.fbm({ freq: 48, octaves: 2, seed: 23 });

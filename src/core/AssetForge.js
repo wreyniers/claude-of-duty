@@ -681,10 +681,11 @@ void main() {`
 	diffuseColor.rgb = mix( diffuseColor.rgb, diffuseColor.rgb * uMacroTint * 1.6, macroDirt );${
     detail
       ? `
-	// One tap, read here and used twice: for roughness below and for the detail
-	// normal further down. Branched rather than faded to nothing, because past the
-	// fade distance the tap is pure cost — its own frequency is far under a pixel
-	// there and the base map's mips already describe that scale correctly.
+	// One tap, read here and used three times: albedo immediately below, roughness
+	// in the next block, the detail normal further down. Branched rather than faded
+	// to nothing, because past the fade distance the tap is pure cost — its own
+	// frequency is far under a pixel there and the base map's mips already describe
+	// that scale correctly.
 	vec4 macroDtl = vec4( 0.5, 0.5, 1.0, uDetail2.y );
 	float macroDtlFade = 1.0 - smoothstep( uDetail.w * 0.45, uDetail.w, length( vViewPosition ) );
 	if ( macroDtlFade > 0.004 ) macroDtl = texture2D( normalMap, vNormalMapUv * uDetail.x );

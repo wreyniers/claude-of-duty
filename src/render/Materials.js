@@ -24,7 +24,7 @@ import { clamp01, smoothstep } from './Noise.js';
  *   physical    use MeshPhysicalMaterial (cloth sheen, glass)
  *   mat         extra material parameters
  *   macro       world-space large-scale variation (false disables)
- *   detail      near-field second normal/roughness layer at N x the base UV
+ *   detail      near-field second albedo/normal/roughness layer at N x the base UV
  *   heal        world-space gate for the damage this recipe writes to b.damage
  *   dust        strength of the up-facing dust film (false disables)
  *   translucency thin-surface transmission for a sheet the sun gets through
@@ -104,7 +104,16 @@ export const MATERIAL_RECIPES = {
     // it is the surface that most needs something under a one-metre read: at
     // 2.5 m a tile the base map is about a centimetre a texel, which is five
     // screen pixels of the same value at knee height.
-    detail: { freq: 9, normal: 0.5, rough: 0.2, fade: 7 },
+    //
+    // `albedo` is the number that made this layer visible. Measured over the baked
+    // field, this recipe's albedo luminance has sd 11.6 in 8-bit, of which 9.9
+    // survives an eight-texel box — i.e. almost all of its variation is above
+    // 8 cm and there is nothing at all below it, which is precisely the "soft
+    // cloudy mottle, no high-frequency content" the near ground was failing on.
+    // Normal and roughness could not fix that: this surface bakes at 0.83 mean
+    // roughness, where the specular lobe is already as wide as it goes.
+    // 0.65 against a height sd of 0.105 is about 9 levels of grain at 1 mm scale.
+    detail: { freq: 9, normal: 0.5, rough: 0.2, albedo: 0.65, fade: 10 },
     build(b) {
       // gain above 0.5 deliberately: a mathematically clean fBm spectrum reads as
       // soft cloud at texture scale, and cement grain is not soft.
@@ -178,21 +187,22 @@ export const MATERIAL_RECIPES = {
     uvScale: 3,
     normalScale: 1.5,
     macro: { scale: 0.06, albedo: 0.17, rough: 0.15, grime: 0.3, patch: 0.14, patchFreq: 0.3, runs: 0.45, runFreq: 1.3 },
-    detail: { freq: 9, normal: 0.55, rough: 0.24, fade: 7 },
+    detail: { freq: 9, normal: 0.55, rough: 0.24, albedo: 0.5, fade: 9 },
     // Every mask in a tiling texture tiles, including the one that exists to make
-    // the damage regional — so at 2.5 m a tile the "regional" gate repeated twice
-    // across a 4 m pedestal and painted the identical crack network on all of it.
-    // The bake now writes what is damage into b.damage and the world-space gate
-    // decides where damage happens at all, which is the only place that decision
-    // can be made without a seam.
-    heal: { amount: 0.92, threshold: 0.46, rough: 0.66, tint: 0x8b8880, normal: 0.85 },
+    // the damage regional — and the level tiles this recipe at 3.2x, so one tile is
+    // 78 cm and *any* in-tile gate is a motif that repeats five times across a
+    // four-metre pedestal. The bake writes what is damage into b.damage and the
+    // world-space gate below decides where damage happens at all, which is the only
+    // place that decision can be made without a seam. `freq` is the gate's own
+    // field: 0.55 cells per metre is a 1.8 m patch, so a 4 m surface draws five
+    // cells and the threshold leaves one or two of them wrecked.
+    heal: { amount: 0.92, threshold: 0.46, freq: 0.55, rough: 0.66, tint: 0x8b8880, normal: 0.85 },
     build(b) {
       const spall = b.cells({ freq: 13, jitter: 1, mode: 'f1', seed: 21 });
       const spallId = b.cells({ freq: 13, jitter: 1, mode: 'id', seed: 21 });
       const cracks = b.warp(b.cells({ freq: 8, mode: 'edge', seed: 88 }), { freq: 4, amount: b.size * 0.035 });
       const grain = b.fbm({ freq: 16, octaves: 6, gain: 0.6, seed: 5 });
       const agg = b.cells({ freq: 34, mode: 'id', seed: 1301 });
-      const region = b.fbm({ freq: 1.7, octaves: 3, seed: 1777 });
       const face = lin(0x8b8880);
       const core = lin(0x9d968a);
       const dark = lin(0x3a3732);
@@ -213,7 +223,15 @@ export const MATERIAL_RECIPES = {
         const rad = 0.13 + (id - 0.58) * 0.62;
         return smoothstep(rad, rad * 0.72, spall[i]);
       };
-      const crackAt = (i) => smoothstep(0.055, 0.006, cracks[i]) * smoothstep(0.5, 0.72, region[i]);
+      // Ungated in tile space, on purpose. A second fBm mask here used to decide
+      // which parts of the tile cracked, and at 78 cm a tile its features were
+      // 46 cm across and came back five times over on one wall — the eye reads a
+      // mask that repeats at half a metre as the pattern itself. What the bake
+      // writes is now "this is what cracked concrete looks like" at full density,
+      // and `heal` above decides, in world space, which stretch of wall is the
+      // cracked one. The two masks in series would have healed the network to
+      // nothing wherever they disagreed.
+      const crackAt = (i) => smoothstep(0.055, 0.006, cracks[i]);
       b.each((i) => {
         b.height[i] = 0.72 + (grain[i] - 0.5) * 0.22 - craterAt(i) * 0.62 - crackAt(i) * 0.3;
       });
@@ -293,7 +311,7 @@ export const MATERIAL_RECIPES = {
     // Limewash over plaster is genuinely smooth, so what the near field wants back
     // is the trowel stipple, not aggregate — but it wants it at a strength that
     // survives being a metre and a half away.
-    detail: { freq: 8, normal: 0.5, rough: 0.18, fade: 6 },
+    detail: { freq: 8, normal: 0.5, rough: 0.18, albedo: 0.35, fade: 8 },
     build(b) {
       const trowel = b.warp(b.fbm({ freq: 5, octaves: 4 }), { freq: 2, amount: b.size * 0.11 });
       const stipple = b.fbm({ freq: 40, octaves: 2, seed: 71 });
@@ -475,7 +493,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 3,
     normalScale: 1.15,
     macro: { scale: 0.04, albedo: 0.18, rough: 0.18, grime: 0.16, tint: 0x6a6558, patch: 0.17, patchFreq: 0.26, runs: 0.2 },
-    detail: { freq: 10, normal: 0.5, rough: 0.2, fade: 7 },
+    detail: { freq: 10, normal: 0.5, rough: 0.2, albedo: 0.5, fade: 10 },
     build(b) {
       const aggId = b.cells({ freq: 30, mode: 'id', seed: 3 });
       const aggH = b.cells({ freq: 30, mode: 'dome', jitter: 1, seed: 3 });
@@ -509,7 +527,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 3,
     normalScale: 1.0,
     macro: { scale: 0.05, albedo: 0.18, rough: 0.1, grime: 0.1, patch: 0.17, patchFreq: 0.3, runs: 0.15 },
-    detail: { freq: 9, normal: 0.45, rough: 0.18, fade: 6 },
+    detail: { freq: 9, normal: 0.45, rough: 0.18, albedo: 0.45, fade: 8 },
     build(b) {
       const clods = b.cells({ freq: 15, mode: 'dome', jitter: 1, seed: 7 });
       const grit = b.fbm({ freq: 30, octaves: 3, seed: 8 });
@@ -542,7 +560,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 3,
     normalScale: 1.7,
     macro: { scale: 0.06, albedo: 0.14, rough: 0.08, grime: 0.12, patch: 0.17, patchFreq: 0.8, runs: 0.32, runFreq: 1.9 },
-    detail: { freq: 8, normal: 0.4, rough: 0.16, fade: 5 },
+    detail: { freq: 8, normal: 0.4, rough: 0.16, albedo: 0.3, fade: 6 },
     build(b) {
       const dome = b.cells({ freq: 13, mode: 'dome', jitter: 1, seed: 31 });
       const sid = b.cells({ freq: 13, mode: 'id', jitter: 1, seed: 31 });
@@ -575,7 +593,7 @@ export const MATERIAL_RECIPES = {
     uvScale: 4,
     normalScale: 0.8,
     macro: { scale: 0.07, albedo: 0.11, rough: 0.07, grime: 0.06, patch: 0.14, patchFreq: 0.22, runs: 0.1 },
-    detail: { freq: 12, normal: 0.35, rough: 0.12, fade: 5 },
+    detail: { freq: 12, normal: 0.35, rough: 0.12, albedo: 0.35, fade: 8 },
     build(b) {
       const drift = b.fbm({ freq: 3, octaves: 4, seed: 19 });
       const grain = b.fbm({ freq: 48, octaves: 2, seed: 23 });

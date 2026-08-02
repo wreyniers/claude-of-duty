@@ -387,7 +387,17 @@ export class AssetForge {
 
     const n = size * size;
     const height = b.height;
-    for (let i = 0; i < n; i++) height[i] = clamp01(height[i]);
+    let hsum = 0;
+    for (let i = 0; i < n; i++) {
+      height[i] = clamp01(height[i]);
+      hsum += height[i];
+    }
+    // The height field's own mean. The near-field detail layer re-reads this map
+    // through its alpha at a multiple of the base frequency, and a term centred on
+    // this number averages to exactly zero over any patch of the surface — which
+    // is the only thing that lets that term modulate albedo without moving the
+    // level of anything. See `_patchMacro`.
+    const heightMean = hsum / n;
 
     const ao = horizonAOField(height, size, {
       relief: b.aoRelief,
@@ -472,7 +482,7 @@ export class AssetForge {
     mat.name = name;
     mat.userData.forge = { name, tile: recipe.tile ?? 1, uvScale: uv, size };
 
-    if (recipe.macro !== false) this._patchMacro(mat, recipe.macro || {}, recipe);
+    if (recipe.macro !== false) this._patchMacro(mat, recipe.macro || {}, recipe, heightMean);
 
     this.stats.baked++;
     this.stats.perMaterial[name] = +(performance.now() - t0).toFixed(1);
@@ -536,9 +546,16 @@ export class AssetForge {
    * - **Detail layer.** How close the camera is. The baked maps are authored at
    *   about a centimetre a texel, so inside a couple of metres they are magnified
    *   past their own resolution and the surface goes soft — the one place a
-   *   procedural material looks *worse* the closer you get to it.
+   *   procedural material looks *worse* the closer you get to it. The layer drives
+   *   albedo as well as normal and roughness, and albedo is the channel that
+   *   actually carries it: measured over the baked field, concrete sits at 0.83
+   *   mean roughness, where a roughness perturbation moves a 4% Fresnel lobe that
+   *   is already as wide as it goes, and a normal perturbation only reads where
+   *   the sun lands directly. On rough dielectric in ambient light — which is most
+   *   of the near ground in any of these frames — value variation is the only one
+   *   of the three the eye can see.
    */
-  _patchMacro(mat, cfg, recipe = {}) {
+  _patchMacro(mat, cfg, recipe = {}, heightMean = 0.5) {
     const scale = cfg.scale ?? 0.11;
     const albedoAmt = cfg.albedo ?? 0.13;
     const roughAmt = cfg.rough ?? 0.12;
@@ -562,12 +579,18 @@ export class AssetForge {
         shader.uniforms.uDetail = {
           value: new THREE.Vector4(detail.freq ?? 8, detail.normal ?? 0.5, detail.rough ?? 0.22, detail.fade ?? 7),
         };
+        shader.uniforms.uDetail2 = { value: new THREE.Vector2(detail.albedo ?? 0, heightMean) };
       }
       if (heal) {
         shader.uniforms.uHeal = {
           value: new THREE.Vector4(heal.amount ?? 0.85, heal.threshold ?? 0.44, heal.rough ?? 0.72, heal.normal ?? 0.8),
         };
         shader.uniforms.uHealTint = { value: new THREE.Color(heal.tint ?? 0x8b8880) };
+        // Cells per metre for the gate's own field. Deliberately not the albedo
+        // patch band: that one is tuned to break the tile up, this one has to be
+        // coarse enough that a four-metre wall gets one or two wrecked patches
+        // rather than a gradient across the whole of it.
+        shader.uniforms.uHealFreq = { value: heal.freq ?? 0.55 };
       }
       if (thru) {
         // The sun's own live objects, shared by reference, so the term follows a
@@ -614,8 +637,8 @@ uniform vec4 uMacro;
 uniform vec4 uMacro2;
 uniform vec3 uMacroTint;
 uniform vec2 uDust;
-${detail ? 'uniform vec4 uDetail;' : ''}
-${heal ? 'uniform vec4 uHeal;\nuniform vec3 uHealTint;' : ''}
+${detail ? 'uniform vec4 uDetail;\nuniform vec2 uDetail2;' : ''}
+${heal ? 'uniform vec4 uHeal;\nuniform vec3 uHealTint;\nuniform float uHealFreq;' : ''}
 ${thru ? 'uniform vec4 uBack;\nuniform vec3 uSunDir;\nuniform vec3 uSunTint;' : ''}
 float macroHash( vec3 p ) {
 	p = fract( p * 0.3183099 + vec3( 0.71, 0.113, 0.419 ) );
@@ -662,9 +685,19 @@ void main() {`
 	// normal further down. Branched rather than faded to nothing, because past the
 	// fade distance the tap is pure cost — its own frequency is far under a pixel
 	// there and the base map's mips already describe that scale correctly.
-	vec4 macroDtl = vec4( 0.5, 0.5, 1.0, 0.5 );
+	vec4 macroDtl = vec4( 0.5, 0.5, 1.0, uDetail2.y );
 	float macroDtlFade = 1.0 - smoothstep( uDetail.w * 0.45, uDetail.w, length( vViewPosition ) );
-	if ( macroDtlFade > 0.004 ) macroDtl = texture2D( normalMap, vNormalMapUv * uDetail.x );`
+	if ( macroDtlFade > 0.004 ) macroDtl = texture2D( normalMap, vNormalMapUv * uDetail.x );
+	// The tap's alpha is the height field. Centred on the map's *own* mean rather
+	// than on 0.5, for two reasons: the term then integrates to zero over any
+	// stretch of surface, so it is a grain and not a brightness control; and the
+	// mip chain converges this tap to that same mean, so the layer switches itself
+	// off as its frequency drops under a pixel instead of leaving a bias behind.
+	float macroDtlH = ( macroDtl.a - uDetail2.y ) * macroDtlFade;
+	// Value, not hue: exposed aggregate in a cement matrix is a lightness
+	// difference, and it is the only one of the three detail channels that reads
+	// on a rough dielectric lit by the sky rather than by the sun.
+	diffuseColor.rgb *= 1.0 + macroDtlH * uDetail2.x;`
       : ''
   }`
         )
@@ -672,16 +705,20 @@ void main() {`
           '#include <roughnessmap_fragment>',
           `#include <roughnessmap_fragment>
 	roughnessFactor = clamp( roughnessFactor + ( macroN - 0.5 ) * 2.0 * uMacro.z + macroDirt * 0.28
-		+ macroDust * uDust.x${detail ? ' + ( macroDtl.a - 0.5 ) * uDetail.z * macroDtlFade' : ''}, 0.04, 1.0 );${
+		+ macroDust * uDust.x${detail ? ' + macroDtlH * uDetail.z' : ''}, 0.04, 1.0 );${
     heal
       ? `
 	// The damage mask rides in the ORM alpha. Healing it back toward the intact face
 	// wherever the world field says this stretch of surface was spared is what turns
 	// a tiling crack network into a couple of damaged patches per wall — the mask
 	// itself cannot know, because it repeats along with everything else in the tile.
+	// Its own world field, at its own frequency: sharing the albedo patch band tied
+	// the size of a wrecked patch to a term tuned for something else entirely, and
+	// at that band's scale a four-metre wall got a gradient rather than patches.
 	float macroHeal = 0.0;
 	#ifdef USE_ROUGHNESSMAP
-		macroHeal = texelRoughness.a * uHeal.x * ( 1.0 - smoothstep( uHeal.y, uHeal.y + 0.2, macroPatch ) );
+		float macroHealF = macroVal( vMacroPos * uHealFreq + 7.3 );
+		macroHeal = texelRoughness.a * uHeal.x * ( 1.0 - smoothstep( uHeal.y, uHeal.y + 0.2, macroHealF ) );
 		diffuseColor.rgb = mix( diffuseColor.rgb, uHealTint * ( 0.82 + 0.36 * macroN ), macroHeal );
 		roughnessFactor = mix( roughnessFactor, uHeal.z, macroHeal );
 	#endif`
@@ -712,6 +749,25 @@ void main() {`
 #else
 	#include <normal_fragment_maps>
 #endif`
+        );
+      }
+
+      if (heal) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <aomap_fragment>',
+          `#include <aomap_fragment>
+	// The fourth channel the heal has to reach. AO is baked from the same height
+	// field the cracks are cut into, so a texel the world gate has just declared
+	// intact — new albedo, new roughness, relief flattened — still arrived carrying
+	// the crack's occlusion, and a dark line network in indirect light is most of
+	// what "crazy paving" actually is. Ungated, that network was identical on every
+	// tile of every wall. Undoing the occlusion is a divide because the include has
+	// already applied it; clamped, because a deep crater's AO is small and 1/x is
+	// not, and bounded to the damage texels the gate healed, which measure under a
+	// tenth of the surface.
+	#ifdef USE_AOMAP
+		reflectedLight.indirectDiffuse *= mix( 1.0, 1.0 / max( ambientOcclusion, 0.25 ), macroHeal );
+	#endif`
         );
       }
 
@@ -751,7 +807,7 @@ void main() {`
     // one of them would be missing the varyings. The key has to name which blocks
     // were injected too, or two recipes with the same parameters and different
     // injections would share whichever program compiled first.
-    const key = `forge-macro-3${detail ? 'd' : ''}${heal ? 'h' : ''}${thru ? 't' : ''}`;
+    const key = `forge-macro-4${detail ? 'd' : ''}${heal ? 'h' : ''}${thru ? 't' : ''}`;
     mat.customProgramCacheKey = () => key;
   }
 

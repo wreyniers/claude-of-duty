@@ -222,10 +222,16 @@ export class AIDirector {
     const posts = this._posts ?? (this._posts = this._rankPosts());
     if (!posts.length) return [];
 
+    // Buddy pairs. Soldiers hold a position two-up, not one man every fifteen
+    // metres, and a wave spread one deep across every post the ranking returned
+    // is four lone sentries with no mutual support — worse doctrine, and it
+    // scatters the squad so thinly that no single position reads as held.
+    const used = Math.min(posts.length, Math.max(1, Math.ceil(n / 2)));
+
     const out = [];
     for (let i = 0; i < n; i++) {
-      const post = posts[i % posts.length];
-      const rank = Math.floor(i / posts.length); // 0 = on the post, 1+ = flanking it
+      const post = posts[i % used];
+      const rank = Math.floor(i / used); // 0 = on the post, 1+ = flanking it
       const slot = this._slotFor(post, rank, i);
       const e = this._makeEnemy(post, slot, this.enemies.length);
       // A wave is a squad being committed, not a patrol being surprised. It comes

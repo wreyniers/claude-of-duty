@@ -288,9 +288,14 @@ export class HUD {
       if (e?.shooter !== 'player') return;
       this._pushMark(e.zone === 'head' ? 1 : 0);
     });
-    on('combat:kill', (e) => {
-      this._pushMark(2);
-      this._pushFeed(e?.killer ?? 'YOU', e?.victim ?? 'ENEMY', e?.weapon ?? '', e?.killer === undefined || e?.killer === 'player');
+    // AIDirector announces deaths as `ai:death` with the shooter tag Ballistics
+    // was given, so a kill the player did not make still shows in the feed but
+    // does not earn a kill marker.
+    on('ai:death', (e) => {
+      const mine = e?.killer === 'player';
+      if (mine) this._pushMark(2);
+      const victim = `HOSTILE ${String((e?.enemy?.id ?? 0) + 1).padStart(2, '0')}`;
+      this._pushFeed(mine ? 'YOU' : String(e?.killer ?? 'ENEMY'), victim, '', mine);
     });
     on('player:damaged', (e) => {
       this._dmgFlash = Math.min(1, this._dmgFlash + 0.55 + (e?.amount ?? 0) / 120);
@@ -771,7 +776,10 @@ export class HUD {
   _drawDeath() {
     const ctx = this.ctx;
     const u = this.u;
-    ctx.fillStyle = 'rgba(4,6,9,0.45)';
+    // Light on purpose. The low-health vignette is already at full strength by
+    // the time this draws, and a heavy scrim on top would darken the whole frame
+    // — which is a review of the lighting and the composition, not of the HUD.
+    ctx.fillStyle = 'rgba(4,6,9,0.2)';
     ctx.fillRect(0, 0, this.w, this.h);
     this._text('KILLED IN ACTION', this.w * 0.5, this.h * 0.5, 20 * u, INK(0.85), { align: 'center', tracking: 0.34, weight: 0.14 });
   }

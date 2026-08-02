@@ -46,30 +46,31 @@ body {
 .hud {
   position: absolute;
   inset: 0;
-  pointer-events: none;
   user-select: none;
 }
 
-.crosshair {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 3px;
-  height: 3px;
-  margin: -1.5px 0 0 -1.5px;
-  background: var(--hud);
-  border-radius: 50%;
-  box-shadow: 0 0 4px rgba(0, 0, 0, 0.9);
+/*
+ * The `#ui-root > *` rule above is an ID selector and outranks a bare `.hud`,
+ * so the HUD would otherwise take pointer events and eat the click that grabs
+ * pointer lock. Match its specificity to hand them back.
+ */
+#ui-root .hud,
+#ui-root .hud-canvas {
+  pointer-events: none;
 }
 
-.ammo {
+/*
+ * The HUD is one canvas, and its backing store is sized to the renderer's
+ * drawing buffer by HUD.js — never here. Stretching it with CSS is what would
+ * scale a bitmap up; this rule only maps those device pixels back onto the
+ * viewport at exactly the ratio the GL canvas uses.
+ */
+.hud-canvas {
   position: absolute;
-  right: 4vw;
-  bottom: 4vh;
-  font-size: 2.6rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.85);
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .boot-screen {

@@ -95,7 +95,26 @@ const MS_FILL = 0.85;
  */
 const BASE_PARAMS = {
   elevation: 17,
-  azimuth: -38, // degrees clockwise from -Z; -38 puts the sun off the left shoulder
+  /**
+   * Degrees clockwise from -Z, which is also where every review pose looks.
+   *
+   * This was -38, and that is why three rounds of key-versus-fill tuning could not
+   * make anything read as solid. At -38 the sun sits behind the camera's shoulder,
+   * so a facade square to the view and its own orthogonal return are both lit at
+   * nearly the same incidence — frontal light, which flattens form no matter how
+   * many stops separate key from fill. The reviews measured exactly that: two
+   * faces of one building at 1.08:1, a lit cylinder with no terminator, while the
+   * key itself demonstrably worked wherever it landed side-on (3.2:1 across a
+   * sunlit-to-shaded edge).
+   *
+   * At -88 the key rakes across the view axis instead. Faces pointing along the
+   * street now separate from faces across it by the cosine between them rather
+   * than by a few percent, which is what puts a terminator on a cylinder and a
+   * dark side on a box. It also throws the long shadows a 17-degree sun should be
+   * casting *across* the frame, where they read, instead of away from camera
+   * where they hide behind the objects that cast them.
+   */
+  azimuth: -88,
   turbidity: 3.2,
   rayleigh: 2.0,
   mieCoefficient: 0.0075,

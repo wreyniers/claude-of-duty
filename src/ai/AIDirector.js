@@ -228,6 +228,15 @@ export class AIDirector {
       const rank = Math.floor(i / posts.length); // 0 = on the post, 1+ = flanking it
       const slot = this._slotFor(post, rank, i);
       const e = this._makeEnemy(post, slot, this.enemies.length);
+      // A wave is a squad being committed, not a patrol being surprised. It comes
+      // in alert and looking, which is both what the word means and what stops the
+      // outcome depending on which way a spawn point's authored yaw happens to
+      // face at the moment it is used.
+      e.state = S.ALERT;
+      if (this.game.player) {
+        e.lastKnown.copy(this.game.player.position);
+        e.hasLastKnown = true;
+      }
       this.enemies.push(e);
       out.push(e);
     }
@@ -354,6 +363,11 @@ export class AIDirector {
       o.receiveShadow = true;
     });
 
+    // Which shoulder this one shoots off. Everything asymmetric about the pose —
+    // the hip blade, the resting torso twist, which foot is forward — hangs off
+    // this one sign, so two adjacent bodies are mirror images rather than clones.
+    const blade = (index % 2 === 0 ? 1 : -1) * this.rng.range(0.26, 0.46);
+
     const e = {
       isEnemy: true,
       id: index,
@@ -386,17 +400,18 @@ export class AIDirector {
       // makes one of them the dangerous one.
       biasX: this.rng.gauss() * SPREAD * 0.8,
       biasY: this.rng.gauss() * SPREAD * 0.8,
+      stanceBias: blade,
       thinkPhase: index % THINK_STEPS,
       hitboxes: [],
       hitGroup: null,
       // Base pose, in radians. Animation is a delta on these so a walk cycle or a
       // flinch never fights the stance the body was authored standing in.
       base: {
-        thighL: -0.12,
-        thighR: 0.14,
-        shinL: 0.16,
-        shinR: -0.05,
-        chestYaw: 0.24,
+        thighL: blade > 0 ? -0.15 : 0.13,
+        thighR: blade > 0 ? 0.13 : -0.15,
+        shinL: blade > 0 ? 0.19 : -0.04,
+        shinR: blade > 0 ? -0.04 : 0.19,
+        chestYaw: 0.22 * Math.sign(blade),
         chestPitch: 0.06,
       },
     };
@@ -499,8 +514,13 @@ export class AIDirector {
       const dist = this._eye.distanceTo(this._aim);
       if (dist < SIGHT_RANGE) {
         this._dir.copy(this._aim).sub(this._eye).normalize();
+        // The vision cone only gates a soldier who does not know there is a fight.
+        // Once alerted he is sweeping his sector and the squad is sharing contacts,
+        // so gating on instantaneous facing would mean a body whose spawn yaw
+        // happens to point away never turns around — which is not a soldier, it is
+        // a turret with a blind spot.
         const facing = -Math.sin(e.yaw) * this._dir.x - Math.cos(e.yaw) * this._dir.z;
-        if (facing > FOV_COS || e.state === S.ENGAGE || e.state === S.SUPPRESSED) {
+        if (e.state !== S.IDLE || facing > FOV_COS) {
           los = col?.segmentClear ? col.segmentClear(this._eye, this._aim) : true;
         }
       }
@@ -536,18 +556,26 @@ export class AIDirector {
 
       case S.COVER:
         // Fall back onto the post and hold it. A defender that walks the whole
-        // map at the player is neither good behaviour nor a stable frame.
+        // map at the player is neither good behaviour nor a stable frame. Standing
+        // down is a long fuse and it goes to IDLE, not back to ALERT: bouncing
+        // between the two is a loop that changes nothing except which comment
+        // explains it.
         e.target.copy(e.slot);
         if (e.hasLastKnown) e.targetYaw = yawTo(e.position, e.lastKnown);
         e.weaponUp = approach(e.weaponUp, 0.5, dt * 3);
-        if (e.position.distanceTo(e.slot) < 0.35 && e.stateT > 1.2) this._setState(e, S.ALERT);
+        if (e.position.distanceTo(e.slot) < 0.35 && e.stateT > 12) this._setState(e, S.IDLE);
         break;
 
       case S.ENGAGE: {
         e.target.copy(e.slot);
         e.weaponUp = approach(e.weaponUp, 1, dt * 4);
         if (player) {
-          e.targetYaw = yawTo(e.position, player.position);
+          // Bladed, not square. A rifleman stands at an angle to his firing line
+          // and squares only his shoulders, so the hips give a three-quarter
+          // presentation while the weapon still points at the threat. Standing
+          // four bodies dead-on to the camera is both wrong and the flattest
+          // silhouette a figure can have.
+          e.targetYaw = yawTo(e.position, player.position) + e.stanceBias;
           const dy = player.position.y + (player.eyeHeight ?? 1.7) * 0.72 - (e.position.y + EYE);
           const flat = Math.hypot(player.position.x - e.position.x, player.position.z - e.position.z);
           e.aimPitch = approach(e.aimPitch, Math.atan2(dy, Math.max(0.4, flat)), dt * 6);
@@ -678,6 +706,9 @@ export class AIDirector {
 
   _setState(e, state) {
     if (e.state === state) return;
+    // Acquiring a target costs time even when the target was already there. Set
+    // here rather than in the ENGAGE branch so every route into it pays.
+    if (state === S.ENGAGE) e.fireCd = Math.max(e.fireCd, REACTION);
     e.state = state;
     e.stateT = 0;
   }
@@ -710,15 +741,20 @@ export class AIDirector {
         p.pelvis.position.y = approach(p.pelvis.position.y, 0.93 - crouch, d * 6);
         p.pelvis.rotation.y = Math.sin(e.walkPhase) * 0.06 * clamp01(e.speed);
       }
+      // The hips carry the stance bias, so the shoulders have to come back off it
+      // or the rifle would point wherever the feet do. Three quarters of the way,
+      // not all of it: a shooter's shoulders sit slightly open too, and that
+      // residual is what keeps the chest from reading as a flat plate.
+      const chestYaw = e.base.chestYaw * (1 - e.weaponUp) - e.stanceBias * 0.75 * e.weaponUp;
       if (p.chest) {
-        p.chest.rotation.y = e.base.chestYaw * (0.4 + 0.6 * e.weaponUp);
+        p.chest.rotation.y = chestYaw;
         p.chest.rotation.x = e.base.chestPitch + crouch * 1.4;
       }
       // The head leads the turn, which is the cheapest thing that makes a body
       // look like it is paying attention rather than being rotated by a script.
       if (p.head) {
         const lead = wrapPi(e.targetYaw - e.yaw);
-        p.head.rotation.y = -e.base.chestYaw * 0.7 + THREE.MathUtils.clamp(lead, -0.7, 0.7);
+        p.head.rotation.y = -chestYaw * 0.6 + THREE.MathUtils.clamp(lead, -0.7, 0.7);
         p.head.rotation.x = -e.aimPitch * 0.5;
       }
 

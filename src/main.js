@@ -357,6 +357,14 @@ function captureFrame(engine) {
     }
     snapCtx.putImageData(img, 0, 0);
   }
+  // Composite the HUD. It is drawn on its own canvas rather than into the GL
+  // frame, so it is absent from every readback — which meant no reviewer had ever
+  // seen the HUD in a review frame, and the HUD axis was ungradeable by
+  // construction. putImageData above ignores compositing, hence drawImage after.
+  const hud = engine.game?.hud?.canvas ?? window.GAME?.hud?.canvas;
+  if (hud && hud.width) {
+    snapCtx.drawImage(hud, 0, 0, w, h);
+  }
   const dataUrl = snapCanvas.toDataURL('image/png');
   const tDone = performance.now();
   stage('done');

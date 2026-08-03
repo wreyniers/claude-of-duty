@@ -532,11 +532,25 @@ void main() {
 	// sixteen-step march bands a beam into sixteen visible shells.
 	float t = dt * hash21( gl_FragCoord.xy + uSeed );
 
+	// ENCLOSURE, not distance from the eye.
+	//
+	// A near shell measured from the camera was the wrong discriminator twice over. In
+	// the interior pose the first few metres are wholly in shadow -- the beam edge is
+	// at the aperture, further out -- so gating on the near field killed the very
+	// effect it was meant to serve. And outdoors the shell still charged the dense
+	// term to every foreground surface.
+	//
+	// What actually separates the two cases is whether this pixel is looking at an
+	// enclosed volume: a room's dust fills the room, and open air has none of it. A
+	// surface twelve metres away or nearer is treated as enclosed, thirty and beyond
+	// as open, so an interior gets the dense medium along its whole march while a
+	// vista's distant facades get only the atmosphere's own density.
+	float enclosed = 1.0 - smoothstep( 12.0, 30.0, far );
+
 	float acc = 0.0;
 	// Visibility inside the near shell only, purely to learn whether this ray crossed
 	// a beam edge in the dense air. See the isotropic floor below.
 	float visNear = 0.0;
-	float nNear = 0.0;
 	for ( int i = 0; i < SAMPLES; i ++ ) {
 		// One global sigma was charging the interior's particulate density over the
 		// entire eighty-metre march, so every exterior surface past forty metres
@@ -546,9 +560,9 @@ void main() {
 		// Dust is a property of the room you are standing in, not of the distance to
 		// the horizon, so the dense shell is confined to the near field and the rest
 		// of the march runs at the atmosphere's own density.
-		float sig = t < uNearShell ? uSigma : uSigmaFar;
+		float sig = mix( uSigmaFar, uSigma, enclosed );
 		float v = sunVisibility( uCamPos + dir * t );
-		if ( t < uNearShell ) { visNear += v; nNear += 1.0; }
+		visNear += v;
 		acc += v * exp( -sig * t );
 		t += dt;
 	}
@@ -561,7 +575,8 @@ void main() {
 	// can be live at full strength and still be invisible. Real scattering is not
 	// purely forward: there is a floor of roughly 1/4pi in every direction.
 	//
-	// Applied only where the ray crossed a beam edge INSIDE THE DENSE NEAR FIELD.
+	// Applied only where the ray crossed a beam edge, and only where the volume is
+	// enclosed.
 	// 4*f*(1-f) peaks at an even split of lit and shadowed samples and falls to zero
 	// when a ray is wholly in sun or wholly in shade, which is the condition that
 	// makes a shaft a shaft rather than a wash.
@@ -572,8 +587,8 @@ void main() {
 	// this strong is a property of the dust in the room you are standing in, so both
 	// the split and the weight are confined to the near shell, and a march that barely
 	// enters it barely gets the term.
-	float f = nNear > 0.0 ? visNear / nNear : 1.0;
-	float edge = 4.0 * f * ( 1.0 - f ) * ( nNear / float( SAMPLES ) );
+	float f = visNear / float( SAMPLES );
+	float edge = 4.0 * f * ( 1.0 - f ) * enclosed;
 	float phase = max( phaseFwd, 0.0796 * edge );
 	if ( phase <= 0.0 ) { gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
 

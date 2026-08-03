@@ -551,9 +551,6 @@ void main() {
 	float enclosed = 1.0 - smoothstep( 8.0, 16.0, far );
 
 	float acc = 0.0;
-	// Visibility inside the near shell only, purely to learn whether this ray crossed
-	// a beam edge in the dense air. See the isotropic floor below.
-	float visNear = 0.0;
 	for ( int i = 0; i < SAMPLES; i ++ ) {
 		// One global sigma was charging the interior's particulate density over the
 		// entire eighty-metre march, so every exterior surface past forty metres
@@ -565,7 +562,6 @@ void main() {
 		// of the march runs at the atmosphere's own density.
 		float sig = mix( uSigmaFar, uSigma, enclosed );
 		float v = sunVisibility( uCamPos + dir * t );
-		visNear += v;
 		acc += v * exp( -sig * t );
 		t += dt;
 	}
@@ -578,27 +574,28 @@ void main() {
 	// can be live at full strength and still be invisible. Real scattering is not
 	// purely forward: there is a floor of roughly 1/4pi in every direction.
 	//
-	// Applied only where the ray crossed a beam edge, and only where the volume is
-	// enclosed.
-	// 4*f*(1-f) peaks at an even split of lit and shadowed samples and falls to zero
-	// when a ray is wholly in sun or wholly in shade, which is the condition that
-	// makes a shaft a shaft rather than a wash.
+	// NO ISOTROPIC FLOOR, and the reason is worth recording so nobody re-derives it.
 	//
-	// Measuring that over the whole march was not enough: outdoors, any ray grazing a
-	// building's shadow reads as mixed, and the floor lifted the vista's midground by
-	// thirty levels -- the exact wash this pass had just been rescued from. Scattering
-	// this strong is a property of the dust in the room you are standing in, so both
-	// the split and the weight are confined to the near shell, and a march that barely
-	// enters it barely gets the term.
-	// A gate, not a multiplier. Scaling the isotropic constant by 4f(1-f) directly put
-	// the floor at 0.029 against a forward phase of 0.04 in the very pose it exists
-	// for, so max() always chose the forward term and the change did nothing. An
-	// interior ray is mostly shadowed -- f near 0.1, so 4f(1-f) only reaches about
-	// 0.36 even when the beam edge is obvious. What the term needs to know is whether
-	// there is an edge at all, not how balanced it is.
-	float f = visNear / float( SAMPLES );
-	float gate = smoothstep( 0.05, 0.45, 4.0 * f * ( 1.0 - f ) ) * enclosed;
-	float phase = max( phaseFwd, 0.0796 * gate );
+	// The interior pose has no visible beam because Henyey-Greenstein evaluates to
+	// about a tenth of its peak at ninety degrees to the sun and that pose is
+	// side-lit. The obvious fix is a floor of roughly 1/4pi, gated so it only applies
+	// where a ray crosses a beam edge inside an enclosed volume. Five measured
+	// attempts failed to separate the two cases:
+	//
+	//   whole-march edge test        interior +21, vista +30  (wash)
+	//   near-shell edge test         interior  +3, vista  +2  (nothing)
+	//   per-pixel enclosure 12-30m   interior  +3, vista +12  (wash)
+	//   enclosure 8-16m, gated       interior  +2, vista  +9  (wash)
+	//
+	// The assumption underneath all four was that an interior has shorter sightlines
+	// than an exterior midground. Measured, it does not: this room's far surfaces sit
+	// beyond the vista's market stalls, so no depth-derived enclosure term can tell
+	// them apart. A real fix needs an actual enclosure signal -- sky visibility
+	// accumulated along the ray, or an indoor volume authored in the level -- not a
+	// heuristic on depth. Until then the forward lobe alone is honest: it draws shafts
+	// where the sun is behind the camera-facing geometry and draws nothing side-on,
+	// which is a limitation rather than a wash.
+	float phase = phaseFwd;
 	if ( phase <= 0.0 ) { gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
 
 	// Clamped against the airlight Sky already charges for this path, so the two

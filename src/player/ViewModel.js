@@ -96,12 +96,31 @@ export class ViewModel {
     this.root.traverse((o) => o.layers.set(LAYER_VIEWMODEL));
 
     // View model lighting is separate from the world so the gun always reads well.
+    //
+    // The environment is the part that matters, and its absence was the whole
+    // reason the weapon read as one substance. Nine materials are authored for
+    // this rig, but the metals among them carry `metalness: 1`, which means they
+    // have no diffuse term at all — every photon they show the camera is a
+    // reflection. With only a hard key and a flat ambient there is nothing for
+    // them to reflect, so blued steel, anodised aluminium and polymer all collapse
+    // to the same dark gloss and a review reads the lot as injection-moulded ABS.
+    // Giving this scene the sky map is what lets roughness 0.2 and roughness 0.66
+    // look like different substances.
+    viewmodelScene.environment = this.game.scene.environment ?? null;
+    viewmodelScene.environmentIntensity = 1;
+
     const key = new THREE.DirectionalLight(0xffffff, 2.4);
     key.position.set(-0.6, 1, 0.8);
     key.layers.set(LAYER_VIEWMODEL);
-    const fill = new THREE.AmbientLight(0x8899aa, 0.9);
+    // A rim from behind and opposite the key. On a dark weapon against a dark
+    // interior the silhouette is the only thing separating it from the wall
+    // behind it, and a rim is what draws that edge.
+    const rim = new THREE.DirectionalLight(0xbcd2ff, 1.6);
+    rim.position.set(0.9, 0.35, -1);
+    rim.layers.set(LAYER_VIEWMODEL);
+    const fill = new THREE.AmbientLight(0x8899aa, 0.55);
     fill.layers.set(LAYER_VIEWMODEL);
-    viewmodelScene.add(key, fill);
+    viewmodelScene.add(key, rim, fill);
 
     // The flash rides the muzzle anchor, which the forge parented inside the
     // muzzle part, so it follows the barrel through recoil instead of sitting
@@ -185,6 +204,13 @@ export class ViewModel {
 
   update(dt) {
     const cam = this.game.engine.viewmodelCamera;
+    // Sky rebuilds the PMREM when the time of day moves, and this scene holds its
+    // own reference, so re-point it rather than keeping the one that existed at
+    // boot — a disposed map reflects nothing.
+    const env = this.game.scene.environment;
+    if (env && this.game.viewmodelScene.environment !== env) {
+      this.game.viewmodelScene.environment = env;
+    }
     // Keep the rig parented to the camera in world space.
     this.root.position.copy(cam.position);
     this.root.quaternion.copy(cam.quaternion);

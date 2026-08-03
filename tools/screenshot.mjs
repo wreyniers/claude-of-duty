@@ -73,6 +73,11 @@ const SHOTS = [
       const g = window.GAME;
       g.input.mouse.right = true;
       if (g.weapons) g.weapons.adsProgress = 1;
+      // Hold the trigger. Six consecutive reviews could not grade "the muzzle flash
+      // lights the environment" because this pose never fired a round, so the
+      // criterion was skipped rather than failed. The weapon fires on its own timer
+      // from here, and the settle below is long enough to catch a flash.
+      g.input.mouse.left = true;
     `,
     settle: 45,
   },

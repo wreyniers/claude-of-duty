@@ -438,6 +438,10 @@ function buildLightShaftShader(cascades) {
     uSunRadiance: { value: null },
     uCsmBias: { value: null },
     uSigma: { value: 0.0476 },
+    uSigmaFar: { value: 0.0034 },
+    // Metres. Beyond this the march runs at the atmosphere's own density; inside it
+    // the room's particulate applies. Eight metres is about a room.
+    uNearShell: { value: 8 },
     uMaxDist: { value: 80 },
     uSeed: { value: 0 },
   };
@@ -481,6 +485,8 @@ uniform vec3 uSunDir;
 uniform vec3 uSunRadiance;
 uniform vec4 uCsmBias;
 uniform float uSigma;
+uniform float uSigmaFar;
+uniform float uNearShell;
 uniform float uMaxDist;
 uniform float uSeed;
 ${decl}
@@ -526,11 +532,23 @@ void main() {
 
 	float acc = 0.0;
 	for ( int i = 0; i < SAMPLES; i ++ ) {
-		acc += sunVisibility( uCamPos + dir * t ) * exp( -uSigma * t );
+		// One global sigma was charging the interior's particulate density over the
+		// entire eighty-metre march, so every exterior surface past forty metres
+		// received the whole term and saturated: a review measured a shaded facade
+		// lifting seventy-four levels and its window openings, which are holes into
+		// unlit rooms and should be the darkest thing on it, going from 5 to 98.
+		// Dust is a property of the room you are standing in, not of the distance to
+		// the horizon, so the dense shell is confined to the near field and the rest
+		// of the march runs at the atmosphere's own density.
+		float sig = t < uNearShell ? uSigma : uSigmaFar;
+		acc += sunVisibility( uCamPos + dir * t ) * exp( -sig * t );
 		t += dt;
 	}
 
-	gl_FragColor = vec4( uSunRadiance * ( phase * min( acc * uSigma * dt, 1.0 ) ), 1.0 );
+	// Clamped against the airlight Sky already charges for this path, so the two
+	// terms cannot both bill for the same air.
+	float budget = 1.0 - exp( -uSigmaFar * far );
+	gl_FragColor = vec4( uSunRadiance * ( phase * min( acc * uSigma * dt, budget ) ), 1.0 );
 }
 `,
   };
@@ -1373,7 +1391,10 @@ export class PostFX {
     this._shaftRadiance.set(sun.color.r, sun.color.g, sun.color.b).multiplyScalar(sun.intensity);
 
     const density = this.game.sky?.params?.aerialDensity;
-    if (density > 0) u.uSigma.value = density * this.shaftDust;
+    if (density > 0) {
+      u.uSigma.value = density * this.shaftDust;
+      u.uSigmaFar.value = density;
+    }
     u.uSeed.value = (this._grainTime * 61) % 1000;
   }
 

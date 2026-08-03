@@ -233,8 +233,16 @@ export class ViewModel {
       // in the codebase ever moves them, so keying off those was a no-op dressed
       // up as a fix. `sky.sunIrradiance` is the quantity Lighting itself scales the
       // key by, and it is what changes when the time of day does.
+      // CLAMP, NOT RESCALE. Dividing the sun's irradiance by a constant is a gain
+      // dressed up as a match: at golden hour it *raised* the key at the same moment
+      // the wear change raised worn-area albedo, and the weapon went from 254 to a
+      // clipping 255 in a room whose brightest wall is 164. Two knobs on one system
+      // in one round pushing the same way -- the exact coupling failure written up
+      // in ARCHITECTURE.md, committed by the person who wrote it up.
+      //
+      // The weapon may be lit, but it may not out-shine the room it is standing in.
       const irr = this.game.sky?.sunIrradiance;
-      const sun = (irr ? irr / 3.0 : 1) * (lit.sunIntensityScale ?? 1);
+      const sun = Math.min(1, (irr ? irr / 3.0 : 1)) * (lit.sunIntensityScale ?? 1);
       const fill = lit.fillScale ?? 1;
       // Damped rather than snapped: an instant relight crossing a doorway reads as
       // a bug, and the eye adapting is the effect being imitated anyway.

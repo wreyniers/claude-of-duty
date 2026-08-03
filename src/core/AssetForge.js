@@ -1170,8 +1170,11 @@ function mergeParts(parts) {
  * end to end is the single most recognisable tell of an unfinished view model.
  */
 const RIG_MATS = {
-  anodised: ['gun_aluminium_anodized', { envMapIntensity: 1.4 }],
-  blued: ['gun_steel_blued', { envMapIntensity: 1.5 }],
+  anodised: ['gun_aluminium_anodized', { envMapIntensity: 1.0 }],
+  // 1.5 was what put a 255 specular on the weapon in a room whose brightest wall
+  // reached 164. A gun is not a mirror and it is certainly not brighter than the
+  // building it is carried through.
+  blued: ['gun_steel_blued', { envMapIntensity: 1.05 }],
   polymer: ['gun_polymer', {}],
   polymerTan: ['gun_polymer', { color: 0x8f8672 }],
   rubber: ['rubber', { color: 0x8a8a8a }],

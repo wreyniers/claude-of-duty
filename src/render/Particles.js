@@ -492,16 +492,23 @@ export class Particles {
    */
   _ambientDust(dt) {
     this._dustClock = (this._dustClock ?? 0) + dt;
-    if (this._dustClock < 0.35) return;
+    if (this._dustClock < 0.12) return;
     this._dustClock = 0;
     const cam = this.game.camera;
     // Ahead of the eye and slightly above it, offset randomly so the motes do not
     // spawn in a plane the player can see edge-on.
+    // Spread has to scale with distance or most motes spawn outside the frustum:
+    // at a 70-degree field the half-width is about a metre at a metre and a half, so
+    // a fixed plus-or-minus three metres put the majority off screen and left two or
+    // three soft blobs -- technically emitting, practically invisible, which is the
+    // same failure this project spent a round diagnosing in the shaft pass.
+    const dist = 1.5 + this._rand() * 4.5;
+    const halfWidth = dist * 0.72;
     this._v
-      .set((this._rand() - 0.5) * 6, (this._rand() - 0.5) * 2.4 + 0.6, -(1.5 + this._rand() * 4))
+      .set((this._rand() - 0.5) * 2 * halfWidth, (this._rand() - 0.5) * halfWidth + 0.4, -dist)
       .applyQuaternion(cam.quaternion)
       .add(cam.position);
-    this.emit('dust', this._v, this._up.set(0, 1, 0), { count: 2 });
+    this.emit('dust', this._v, this._up.set(0, 1, 0), { count: 3 });
   }
 
   update(dt) {

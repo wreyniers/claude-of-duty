@@ -270,6 +270,8 @@ export class Particles {
     this._bit = new THREE.Vector3();
     this._v = new THREE.Vector3();
     this._end = new THREE.Vector3();
+    this._up = new THREE.Vector3(0, 1, 0);
+    this._dustClock = 0;
     this._seed = 0x1a2b3c4d;
   }
 
@@ -478,9 +480,34 @@ export class Particles {
     this._tracerBirth[i] = this._time;
   }
 
+  /**
+   * Ambient motes around the camera.
+   *
+   * A `dust` effect was defined from the start and nothing ever emitted it, so the
+   * air was perfectly clean — which a review named directly: an atmosphere with a
+   * correct aerial-perspective curve and no particulate in it still reads as empty
+   * space. Emission is anchored a few metres ahead of the eye rather than spread
+   * over the map, because motes are only legible within a few metres and seeding
+   * the whole square would spend the pool where nobody can see it.
+   */
+  _ambientDust(dt) {
+    this._dustClock = (this._dustClock ?? 0) + dt;
+    if (this._dustClock < 0.35) return;
+    this._dustClock = 0;
+    const cam = this.game.camera;
+    // Ahead of the eye and slightly above it, offset randomly so the motes do not
+    // spawn in a plane the player can see edge-on.
+    this._v
+      .set((this._rand() - 0.5) * 6, (this._rand() - 0.5) * 2.4 + 0.6, -(1.5 + this._rand() * 4))
+      .applyQuaternion(cam.quaternion)
+      .add(cam.position);
+    this.emit('dust', this._v, this._up.set(0, 1, 0), { count: 2 });
+  }
+
   update(dt) {
     if (!this.points) return;
     this._time += dt;
+    this._ambientDust(dt);
     this._material.uniforms.uTime.value = this._time;
     // Point size is in metres at one metre; convert with the vertical FOV so a
     // particle keeps its world size as the ADS zoom changes.

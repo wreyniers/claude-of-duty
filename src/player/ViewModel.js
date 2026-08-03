@@ -109,18 +109,25 @@ export class ViewModel {
     viewmodelScene.environment = this.game.scene.environment ?? null;
     viewmodelScene.environmentIntensity = 1;
 
-    const key = new THREE.DirectionalLight(0xffffff, 2.4);
-    key.position.set(-0.6, 1, 0.8);
-    key.layers.set(LAYER_VIEWMODEL);
+    this._key = new THREE.DirectionalLight(0xffffff, 2.4);
+    this._key.position.set(-0.6, 1, 0.8);
+    this._key.layers.set(LAYER_VIEWMODEL);
     // A rim from behind and opposite the key. On a dark weapon against a dark
     // interior the silhouette is the only thing separating it from the wall
     // behind it, and a rim is what draws that edge.
-    const rim = new THREE.DirectionalLight(0xbcd2ff, 1.6);
-    rim.position.set(0.9, 0.35, -1);
-    rim.layers.set(LAYER_VIEWMODEL);
-    const fill = new THREE.AmbientLight(0x8899aa, 0.55);
-    fill.layers.set(LAYER_VIEWMODEL);
-    viewmodelScene.add(key, rim, fill);
+    //
+    // Near-neutral, not the cold blue it started as: the sky map already dyes a
+    // metal that has no diffuse term, and a blue rim on top took the whole rig to
+    // b/r 1.74 when blued steel should read close to neutral.
+    this._rim = new THREE.DirectionalLight(0xdfe6f2, 1.5);
+    this._rim.position.set(0.9, 0.35, -1);
+    this._rim.layers.set(LAYER_VIEWMODEL);
+    this._fill = new THREE.AmbientLight(0x8899aa, 0.55);
+    this._fill.layers.set(LAYER_VIEWMODEL);
+    viewmodelScene.add(this._key, this._rim, this._fill);
+    this._baseKey = this._key.intensity;
+    this._baseRim = this._rim.intensity;
+    this._baseFill = this._fill.intensity;
 
     // The flash rides the muzzle anchor, which the forge parented inside the
     // muzzle part, so it follows the barrel through recoil instead of sitting
@@ -208,8 +215,41 @@ export class ViewModel {
     // own reference, so re-point it rather than keeping the one that existed at
     // boot — a disposed map reflects nothing.
     const env = this.game.scene.environment;
-    if (env && this.game.viewmodelScene.environment !== env) {
-      this.game.viewmodelScene.environment = env;
+    const vscene = this.game.viewmodelScene;
+    if (env && vscene.environment !== env) vscene.environment = env;
+
+    // Expose the weapon on the world's scale, not its own.
+    //
+    // A fixed rig meant the weapon carried 253-level speculars in a room whose
+    // brightest wall reached 152 — a hundred levels hotter than anything it is
+    // standing in, which is the pasted-on look the rubric names. Riding the same
+    // sun and fill trims the world uses keeps the gun inside the frame's exposure
+    // as the player walks from a sunlit square into a shaded interior, which a
+    // constant can never do.
+    const lit = this.game.lighting;
+    if (lit && this._key) {
+      // Drive from the sun's actual irradiance, not from Lighting's artistic
+      // trims: `sunIntensityScale` and `fillScale` are both constant 1 and nothing
+      // in the codebase ever moves them, so keying off those was a no-op dressed
+      // up as a fix. `sky.sunIrradiance` is the quantity Lighting itself scales the
+      // key by, and it is what changes when the time of day does.
+      const irr = this.game.sky?.sunIrradiance;
+      const sun = (irr ? irr / 3.0 : 1) * (lit.sunIntensityScale ?? 1);
+      const fill = lit.fillScale ?? 1;
+      // Damped rather than snapped: an instant relight crossing a doorway reads as
+      // a bug, and the eye adapting is the effect being imitated anyway.
+      const kt = this._baseKey * sun;
+      const rt = this._baseRim * (0.35 + 0.65 * fill);
+      const ft = this._baseFill * fill;
+      this._key.intensity = THREE.MathUtils.damp(this._key.intensity, kt, 3, dt);
+      this._rim.intensity = THREE.MathUtils.damp(this._rim.intensity, rt, 3, dt);
+      this._fill.intensity = THREE.MathUtils.damp(this._fill.intensity, ft, 3, dt);
+      vscene.environmentIntensity = THREE.MathUtils.damp(
+        vscene.environmentIntensity ?? 1,
+        this.game.scene.environmentIntensity ?? 1,
+        3,
+        dt
+      );
     }
     // Keep the rig parented to the camera in world space.
     this.root.position.copy(cam.position);

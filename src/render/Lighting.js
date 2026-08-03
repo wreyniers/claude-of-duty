@@ -448,6 +448,7 @@ export class Lighting {
         // Re-asserted every frame rather than set once: Sky rewrites this to 1
         // whenever it rebuilds the map, and Lighting updates after Sky.
         this.game.scene.environmentIntensity = this.envFillScale * this.fillScale;
+        this._bindMetalEnv();
       } else if (amb) {
         // No env map built: the hemisphere is the only fill in the scene, so it
         // goes back to carrying the sky — blue above, warm dirt bounce below —
@@ -652,4 +653,41 @@ export class Lighting {
       l.target.removeFromParent();
     }
   }
+  /**
+   * Hand the metals their own reference to the sky map, so their authored
+   * envMapIntensity survives.
+   *
+   * Three replaces envMapIntensity with `scene.environmentIntensity` for any
+   * standard material that has no envMap of its own (WebGLRenderer: `material
+   * .envMap === null && scene.environment !== null`). Every level material is in
+   * that case, so all 24 recipes' authored figures — 1.25 to 1.5 on the metals —
+   * were being discarded and every surface ran at envFillScale, 0.64.
+   *
+   * That single number scales diffuse and specular together, which is why cutting
+   * it to control an over-bright fill also removed every view-dependent highlight
+   * in the frame: a review found "not one specular highlight on any world surface"
+   * across five shots, with the drums reading as smooth airbrushed cylinders.
+   *
+   * Pointing a material at the same map it was already receiving changes nothing
+   * about what it reflects — it only stops the override, so the recipe's own
+   * number applies again. Restricted to metals because they are the surfaces whose
+   * identity depends on a highlight, and because they cover little enough of the
+   * screen that returning them to their authored value cannot re-inflate the
+   * overall fill the way freeing every dielectric would.
+   */
+  _bindMetalEnv() {
+    const env = this.game.scene.environment;
+    if (!env || this._boundEnv === env) return;
+    this._boundEnv = env;
+    const cache = this.game.forge?._materials;
+    if (!cache) return;
+    for (const m of new Set(cache.values())) {
+      if (m.isMeshStandardMaterial && m.envMap === null && m.metalness > 0.5) {
+        m.envMap = env;
+        m.needsUpdate = true;
+      }
+    }
+  }
+
+
 }

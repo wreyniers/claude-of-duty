@@ -82,6 +82,32 @@ Consequences to respect:
 - Generation happens at boot and must stay inside a few seconds total. Bake to a
   `DataTexture` once rather than doing per-frame canvas work.
 
+## Working on this concurrently
+
+Several agents edit this repo at once, and three rounds of independently-verified
+fixes once moved the build *down* — 41 points to 38 — while every agent reported
+success. The cause was not bad work; it was uncoordinated work. Two rules came out
+of that, and they are the difference between rounds that compound and rounds that
+thrash.
+
+**One owner per coupled system, per round.** Sky's radiance, the sun and fill
+intensities, and the grade's exposure are three knobs on one system. Handing them
+to three agents in the same round means each independently corrects for the same
+"too dark" reading and the correction lands three times — which is exactly how the
+frame ended up underexposed with no key light. Either one agent owns the whole
+light chain, or the others are explicitly barred from touching scene level.
+
+**Verify against the axis you did not touch.** An agent that fixes materials and
+checks only materials can cost three points of post-processing and still report a
+pass. Post-processing went 9 to 3 that way.
+
+A third, cheaper lesson: **measure the curve, not a point on it.** A frame here
+retires ~0.13s of simulation, so a 0.5s jump is four samples. Two playtest
+assertions "failed" against behaviour that was entirely correct because they
+sampled once, after the event had finished. The reviews made the same mistake in
+the other direction for three rounds — diagnosing haze from a single statistic
+when the real defect was that the sun was frontal.
+
 ## Capture harness
 
 `node tools/screenshot.mjs` boots the game in headless Chromium (WebGL2 through
@@ -160,3 +186,29 @@ node tools/playtest.mjs --only walk,slide --port 5801
 Assertions tagged `spec` cover subsystems that are not written yet: they are the
 contract those modules have to satisfy and are expected to fail until they are.
 Only `core` failures and console errors fail the run.
+
+
+## Subsystems added after the initial scaffold
+
+- **Particles** (`src/render/Particles.js`) — closed-form GPU integration. A
+  particle stores origin, birth time, velocity and effect parameters; the vertex
+  shader integrates position analytically, so nothing is stepped on the CPU and no
+  buffer is uploaded per frame. `emit(name, position, dir, opts)` writes one
+  ring-buffer slot. Muzzle flash chains its own smoke and impacts chain their own
+  dust, so callers need not know one event is two effects. Tracers use a separate
+  pool of stretched segments.
+- **Decals** (`src/render/Decals.js`) — one instanced draw call, fixed budget,
+  ring cursor. `spawn(kind, point, normal, opts)`. Marks are drawn procedurally
+  from a per-instance seed and rolled at random about the normal.
+- **AudioEngine** (`src/audio/AudioEngine.js`) — entirely synthesised. A gunshot
+  is three layers with different decays (shock crack, muzzle body, room tail);
+  impulse responses are generated as decaying noise, progressively low-passed so
+  tails darken as they die. One shared convolution bus for the whole mix.
+- **ViewModel** (`src/player/ViewModel.js`) — animation only. The rig itself is
+  the forge asset `viewmodel_rig`, which supplies named parts, anchors parented
+  inside the parts that move them, and hip/ADS/lowered poses. Everything is a
+  spring or a damped follow except reload and swap, which are scripted curves
+  because they have fixed durations.
+- **HUD** (`src/ui/HUD.js`) — must render to a canvas exposed as `game.hud.canvas`.
+  The capture composites that canvas over the frame; a DOM-only HUD is invisible to
+  every review, which is why that axis sat at 1 for five rounds.

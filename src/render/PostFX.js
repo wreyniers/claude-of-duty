@@ -441,7 +441,7 @@ function buildLightShaftShader(cascades) {
     uSigmaFar: { value: 0.0034 },
     // Metres. Beyond this the march runs at the atmosphere's own density; inside it
     // the room's particulate applies. Eight metres is about a room.
-    uNearShell: { value: 8 },
+    uNearShell: { value: 5 },
     uMaxDist: { value: 80 },
     uSeed: { value: 0 },
   };
@@ -910,7 +910,10 @@ export class PostFX {
      * weighting applied after the fact either: it is the march's own extinction
      * coefficient, charged step by step along the ray it belongs to.
      */
-    this.shaftDust = 14.0;
+    // 14 was set for interior particulate and, even confined to a near shell, still
+    // laid a constant floor on everything beyond it: a shaded facade that should sit
+    // at 53 came back at 78. Six keeps the interior beam and returns the exterior.
+    this.shaftDust = 6.0;
 
     this.composer = null;
     this.sceneTarget = null;

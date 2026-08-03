@@ -1179,7 +1179,11 @@ const RIG_MATS = {
   polymerTan: ['gun_polymer', { color: 0x8f8672 }],
   rubber: ['rubber', { color: 0x8a8a8a }],
   glass: ['glass_dirty', { color: 0x8fa9bd, opacity: 0.55, roughness: 0.08 }],
-  emitter: ['gun_steel_blued', { color: 0x120503, emissive: 0xff3a14, emissiveIntensity: 2.6, metalness: 0 }],
+  // 2.6 drove the reticle past its own red and out to pure white -- eleven clipped
+  // pixels in a room whose brightest wall reaches 164. A red dot should read as a
+  // bright red dot, and clipping to white is the one thing the tone axis fails on
+  // by name.
+  emitter: ['gun_steel_blued', { color: 0x120503, emissive: 0xff3a14, emissiveIntensity: 1.15, metalness: 0 }],
   skin: ['skin', {}],
   cuff: ['camo_fabric', { color: 0x9a9480 }],
 };

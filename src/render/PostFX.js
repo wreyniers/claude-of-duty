@@ -545,7 +545,10 @@ void main() {
 	// surface twelve metres away or nearer is treated as enclosed, thirty and beyond
 	// as open, so an interior gets the dense medium along its whole march while a
 	// vista's distant facades get only the atmosphere's own density.
-	float enclosed = 1.0 - smoothstep( 12.0, 30.0, far );
+	// 8 to 16 metres, not 12 to 30: a vista's market stalls and barriers sit at
+	// fifteen to twenty-five and were being treated as an enclosed volume, which lifted
+	// the midground by twelve levels. A room's far wall is inside eight.
+	float enclosed = 1.0 - smoothstep( 8.0, 16.0, far );
 
 	float acc = 0.0;
 	// Visibility inside the near shell only, purely to learn whether this ray crossed
@@ -587,9 +590,15 @@ void main() {
 	// this strong is a property of the dust in the room you are standing in, so both
 	// the split and the weight are confined to the near shell, and a march that barely
 	// enters it barely gets the term.
+	// A gate, not a multiplier. Scaling the isotropic constant by 4f(1-f) directly put
+	// the floor at 0.029 against a forward phase of 0.04 in the very pose it exists
+	// for, so max() always chose the forward term and the change did nothing. An
+	// interior ray is mostly shadowed -- f near 0.1, so 4f(1-f) only reaches about
+	// 0.36 even when the beam edge is obvious. What the term needs to know is whether
+	// there is an edge at all, not how balanced it is.
 	float f = visNear / float( SAMPLES );
-	float edge = 4.0 * f * ( 1.0 - f ) * enclosed;
-	float phase = max( phaseFwd, 0.0796 * edge );
+	float gate = smoothstep( 0.05, 0.45, 4.0 * f * ( 1.0 - f ) ) * enclosed;
+	float phase = max( phaseFwd, 0.0796 * gate );
 	if ( phase <= 0.0 ) { gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
 
 	// Clamped against the airlight Sky already charges for this path, so the two

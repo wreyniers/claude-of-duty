@@ -516,9 +516,11 @@ void main() {
 
 	float g2 = ${PHASE_G.toFixed(4)} * ${PHASE_G.toFixed(4)};
 	float denom = max( 1.0 + g2 - 2.0 * ${PHASE_G.toFixed(4)} * dot( dir, uSunDir ), 1e-4 );
-	float phase = ( 1.0 - g2 ) / ( 12.56637061 * pow( denom, 1.5 ) );
-	phase = min( phase, ${PHASE_PEAK.toFixed(4)} ) - ${PHASE_SIDE.toFixed(6)};
-	if ( phase <= 0.0 ) { gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
+	float phaseFwd = ( 1.0 - g2 ) / ( 12.56637061 * pow( denom, 1.5 ) );
+	phaseFwd = min( phaseFwd, ${PHASE_PEAK.toFixed(4)} ) - ${PHASE_SIDE.toFixed(6)};
+	// With the sun properly behind the camera there is no beam to draw and the
+	// isotropic floor below must not invent one.
+	if ( dot( dir, uSunDir ) < -0.35 ) { gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
 
 	// Cleared depth unprojects to the far plane, which is the right direction and
 	// a useless distance; either way the march stops where the medium has already
@@ -531,6 +533,9 @@ void main() {
 	float t = dt * hash21( gl_FragCoord.xy + uSeed );
 
 	float acc = 0.0;
+	// Raw visibility, unweighted, purely to learn whether this ray crossed a beam
+	// edge. See the isotropic floor below.
+	float vis = 0.0;
 	for ( int i = 0; i < SAMPLES; i ++ ) {
 		// One global sigma was charging the interior's particulate density over the
 		// entire eighty-metre march, so every exterior surface past forty metres
@@ -541,9 +546,29 @@ void main() {
 		// the horizon, so the dense shell is confined to the near field and the rest
 		// of the march runs at the atmosphere's own density.
 		float sig = t < uNearShell ? uSigma : uSigmaFar;
-		acc += sunVisibility( uCamPos + dir * t ) * exp( -sig * t );
+		float v = sunVisibility( uCamPos + dir * t );
+		vis += v;
+		acc += v * exp( -sig * t );
 		t += dt;
 	}
+
+	// ISOTROPIC FLOOR, and it is the reason the interior had no beam.
+	//
+	// Henyey-Greenstein is a forward-scatter lobe, so at ninety degrees to the sun it
+	// evaluates to about a tenth of its peak -- and the interior review pose is a
+	// side-sun pose. The term measured non-zero and drew nothing, which is how a pass
+	// can be live at full strength and still be invisible. Real scattering is not
+	// purely forward: there is a floor of roughly 1/4pi in every direction.
+	//
+	// Applied only where the ray actually crossed a beam edge. 4*f*(1-f) peaks at
+	// an even split of lit and shadowed samples and falls to zero when a ray is
+	// wholly in sun or wholly in shade, which is exactly the condition that makes a
+	// shaft a shaft rather than a wash. Without that gate this floor would lay a
+	// broad glow over every exterior -- the defect this pass was just rescued from.
+	float f = vis / float( SAMPLES );
+	float edge = 4.0 * f * ( 1.0 - f );
+	float phase = max( phaseFwd, 0.0796 * edge );
+	if ( phase <= 0.0 ) { gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
 
 	// Clamped against the airlight Sky already charges for this path, so the two
 	// terms cannot both bill for the same air.
@@ -1196,7 +1221,7 @@ export class PostFX {
     if (wantsDepth && settings.volumetrics && cascades > 0) {
       // Software rasterisers pay per tap, and a shaft is a low-frequency signal:
       // it is the one part of the chain whose output survives being run small.
-      const shafts = new LightShaftPass(w, h, software ? 0.25 : 0.34, software ? 16 : 24, cascades);
+      const shafts = new LightShaftPass(w, h, software ? 0.4 : 0.5, software ? 16 : 24, cascades);
       shafts.uniforms.tDepth.value = this.depthTexture;
       shafts.uniforms.uInvViewProj.value = this._invViewProj;
       shafts.uniforms.uCamPos.value = camera.position;

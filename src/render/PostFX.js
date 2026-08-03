@@ -35,7 +35,7 @@ import { MotionBlurShader, VELOCITY_GLSL } from './shaders/MotionBlurShader.js';
  *   TAA             jitter accumulate + neighbourhood-clamped history
  *   motion blur     camera velocity from depth + last frame's view-projection
  *   bloom           high threshold, five mips, low intensity
- *   light shafts    reduced-res sun occlusion, added back inside the grade
+ *   light shafts    reduced-res shadow-cascade raymarch, added inside the grade
  *   view model      its own HDR target with coverage, composited by the grade
  *   grade           ACES RRT+ODT, grading, CA, vignette, grain, sharpen, sRGB
  *   SMAA            morphological AA on the finished LDR frame
@@ -361,136 +361,180 @@ void main() {
 /**
  * Light shafts, as the airlight that survived being shadowed.
  *
- * A true volumetric would march the shadow cascades along every view ray, which
- * on a software rasteriser is not affordable at any resolution worth reviewing.
- * What the depth buffer already knows is whether the straight screen-space line
- * from a pixel toward the sun's vanishing point is blocked — and that line *is*
- * the projection of the sun's shadow volume, because everything radially outward
- * from the sun behind an occluder is exactly what that occluder shadows.
- * Accumulating the radiance of whatever is *still in sun* along it therefore
- * measures how much of the air in front of this pixel is lit, which is the
- * quantity crepuscular rays are made of. Occlusion is the mask; nothing else
- * gates the effect.
+ * This was a screen-space radial integral for four rounds, and it was measurably
+ * nothing: a critic A/B'd shaft strength 0 against 4.8 — eight times the shipped
+ * gain — and moved static wall regions by 1.3 levels out of 255. The reason is
+ * structural rather than a matter of tuning. A radial integral can only report
+ * light that is already *in the frame*, so its mask was a bright pass over the
+ * shaded frame, and a shaft could therefore only appear where a sunlit surface
+ * happened to lie between the pixel and the sun's vanishing point. At the one
+ * pose the technique exists for, the interior, that vanishing point lands on the
+ * room's solid, wholly-shaded west wall — the openings are elsewhere in the
+ * frame — so the integral had nothing to pick up and no gain could conjure it.
  *
- * Three things stop it becoming the whole-frame glow that gives this technique
- * away. It is confined to a forward-scatter lobe around the sun instead of being
- * applied uniformly; the grade weights it by the pixel's own distance, so a wall
- * two metres from the eye picks up almost none of it; and it is scaled down hard
- * whenever the disc itself stands in open sky, which is the case where the mask
- * has no structure and the integral is an aureole rather than a set of rays.
- * Radiance per tap is clamped because the sun disc is authored near 190 and one
- * tap on it would fire a ray brighter than the frame.
+ * So the mask comes from the only structure that actually knows where the sun
+ * reaches: the shadow cascades. Each pixel marches its own eye ray from the
+ * camera to the depth-buffer position and accumulates
+ *
+ *     integral of  sigma * V(x(t)) * exp( -sigma * t )  dt
+ *
+ * which is the single-scattering airlight with sigma_s = sigma_e, normalised so
+ * that an infinitely long fully-lit ray returns exactly 1. Multiplying that by
+ * the sun's own irradiance and a phase function gives scene-referred radiance
+ * with no free gain in it at all — the pass is handed Lighting's key rather than
+ * a number, so a change of weather, of preset or of time of day moves the beams
+ * with the light that casts them.
+ *
+ * Three properties are what keep this from becoming the whole-frame glow that
+ * gives the technique away, and all three are physics rather than gates.
+ *
+ * The phase function is a Henyey-Greenstein lobe evaluated per pixel against
+ * that pixel's own view ray, not a radial falloff around a screen-space point.
+ * With the sun behind the camera every ray is in the backward lobe and the term
+ * is three orders down on its forward value, so "no glow with the sun behind
+ * you" needs no gate. PHASE_SIDE then subtracts the lobe's own value at ninety
+ * degrees, which sets the term to exactly zero across the frame whenever the sun
+ * is off to the side and keeps the four exterior poses from picking up a veil
+ * they never had; it is continuous, so nothing snaps.
+ *
+ * PHASE_PEAK caps the forward spike. A single HG lobe diverges as (1-g)^-3 into
+ * the sun, and that aureole is not this pass' to deliver — Sky's dome already
+ * draws it and bloom already spreads it, so an uncapped peak would be counted
+ * three times. Capped, the phase is near-constant across the sun-facing half of
+ * a frame, which is what it should be: the visible structure is then entirely
+ * the shadow term, i.e. beams.
+ *
+ * And extinction attenuates each step by the air actually in front of it, so a
+ * wall two metres from the eye integrates almost nothing. That replaces the
+ * distance weighting the grade used to apply, which was a stand-in for this
+ * integral back when the pass could not compute it.
  */
-const LightShaftShader = {
-  name: 'LightShaftShader',
-  defines: { SAMPLES: 16 },
-  uniforms: {
-    tDiffuse: { value: null },
+
+/** Henyey-Greenstein asymmetry. Ground haze and plaster dust are strongly forward. */
+const PHASE_G = 0.7;
+/** See PHASE_PEAK / PHASE_SIDE in the block above; both are HG(g) evaluations. */
+const PHASE_PEAK = 0.4;
+const PHASE_SIDE = (1 - PHASE_G * PHASE_G) / (4 * Math.PI * Math.pow(1 + PHASE_G * PHASE_G, 1.5));
+/**
+ * Depth-comparison bias for the march, in metres of the cascade's own ortho
+ * range. The march samples air, not surfaces, so there is no slope to scale
+ * against and no acne to avoid; this only has to stop the last step before a
+ * receiver from being shadowed by that receiver.
+ */
+const SHAFT_BIAS_M = 0.12;
+
+/**
+ * The march is unrolled over the live cascade count because GLSL ES 1.00 cannot
+ * index an array of samplers. PostFX rebuilds the chain on a settings change,
+ * which is also the only thing that can change that count.
+ */
+function buildLightShaftShader(cascades) {
+  const comp = ['x', 'y', 'z', 'w'];
+  const uniforms = {
     tDepth: { value: null },
-    uSunUv: { value: null },
-    uAspect: { value: 16 / 9 },
-    uFalloff: { value: 2.2 },
-    uDecay: { value: 0.94 },
-    uDensity: { value: 1.0 },
-    uMaxRadiance: { value: 3.0 },
-    uAureole: { value: 0.08 },
-    // Scene-referred radiance either side of the bright-pass ramp: below x a
-    // surface is lit by fill and cannot be a source, above y it is standing in
-    // direct sun. These are absolute radiances, so they only mean "in sun" for as
-    // long as the key that puts a surface there stays put — see _shaftBright,
-    // which is re-derived whenever Lighting's key moves.
-    uBright: { value: null },
+    uInvViewProj: { value: null },
+    uCamPos: { value: null },
+    uSunDir: { value: null },
+    uSunRadiance: { value: null },
+    uCsmBias: { value: null },
+    uSigma: { value: 0.0476 },
+    uMaxDist: { value: 80 },
     uSeed: { value: 0 },
-  },
-  vertexShader: /* glsl */ `
+  };
+
+  let decl = '';
+  let select = '';
+  for (let i = 0; i < cascades; i++) {
+    uniforms[`tCsm${i}`] = { value: null };
+    uniforms[`uCsmMat${i}`] = { value: null };
+    decl += `uniform sampler2D tCsm${i};\nuniform mat4 uCsmMat${i};\n`;
+    // Nearest cascade first: it is the highest-resolution answer that contains
+    // the point, and it is the one covering the room a beam is seen inside.
+    select += `
+	sc = uCsmMat${i} * vec4( p, 1.0 );
+	co = sc.xyz / sc.w;
+	if ( all( greaterThan( co, vec3( 0.0 ) ) ) && all( lessThan( co, vec3( 1.0 ) ) ) ) {
+		return step( co.z - uCsmBias.${comp[i]}, unpackRGBAToDepth( texture2D( tCsm${i}, co.xy ) ) );
+	}
+`;
+  }
+
+  return {
+    name: 'LightShaftShader',
+    uniforms,
+    vertexShader: /* glsl */ `
 varying vec2 vUv;
 void main() {
 	vUv = uv;
 	gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
 }
 `,
-  fragmentShader: /* glsl */ `
+    fragmentShader: /* glsl */ `
+#include <packing>
+
 varying vec2 vUv;
 
-uniform sampler2D tDiffuse;
 uniform sampler2D tDepth;
-uniform vec2 uSunUv;
-uniform float uAspect;
-uniform float uFalloff;
-uniform float uDecay;
-uniform float uDensity;
-uniform float uMaxRadiance;
-uniform float uAureole;
-uniform vec2 uBright;
+uniform mat4 uInvViewProj;
+uniform vec3 uCamPos;
+uniform vec3 uSunDir;
+uniform vec3 uSunRadiance;
+uniform vec4 uCsmBias;
+uniform float uSigma;
+uniform float uMaxDist;
 uniform float uSeed;
-
+${decl}
 float hash21( vec2 p ) {
 	p = fract( p * vec2( 123.34, 456.21 ) );
 	p += dot( p, p + 45.32 );
 	return fract( p.x * p.y );
 }
 
-float isSky( vec2 uv ) { return step( 0.999995, texture2D( tDepth, clamp( uv, 0.0, 1.0 ) ).x ); }
+float sunVisibility( vec3 p ) {
+	vec4 sc;
+	vec3 co;
+${select}
+	// Past the last cascade there is no shadow map to consult, and the aerial
+	// term owns that distance anyway.
+	return 1.0;
+}
 
 void main() {
-	vec2 delta = uSunUv - vUv;
-	// Mie forward scattering is a lobe, not a hemisphere: away from the sun there
-	// is nothing for a shaft to be made of.
-	float lobe = exp( -length( delta * vec2( uAspect, 1.0 ) ) * uFalloff );
-	if ( lobe < 0.003 ) { gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
+	float d = texture2D( tDepth, vUv ).x;
+	vec4 clip = vec4( vUv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0 );
+	vec4 world = uInvViewProj * clip;
+	vec3 hit = world.xyz / world.w;
+	vec3 ray = hit - uCamPos;
+	float len = length( ray );
+	vec3 dir = ray / max( len, 1e-4 );
 
-	// Beams and an aureole are the same integral, and only one of them is worth
-	// paying for. With the disc standing in clear sky every pixel's sun-ward taps
-	// are sky all the way, so the term has no structure left in it and lands as a
-	// glow around the sun that the bloom and the aerial in-scatter already deliver.
-	// With the disc behind a roofline, a minaret, a market awning or a wall the mask
-	// is the whole signal, and the gain it needs is an order of magnitude larger.
-	// A disc rather than one texel: a single sample can fall between two fronds and
-	// swing the gain of the entire frame from one frame to the next.
-	vec2 probe = vec2( 0.03 / uAspect, 0.03 );
-	float clear = isSky( uSunUv );
-	clear += isSky( uSunUv + vec2( probe.x, 0.0 ) );
-	clear += isSky( uSunUv - vec2( probe.x, 0.0 ) );
-	clear += isSky( uSunUv + vec2( 0.0, probe.y ) );
-	clear += isSky( uSunUv - vec2( 0.0, probe.y ) );
-	lobe *= mix( 1.0, uAureole, clear * 0.2 );
+	float g2 = ${PHASE_G.toFixed(4)} * ${PHASE_G.toFixed(4)};
+	float denom = max( 1.0 + g2 - 2.0 * ${PHASE_G.toFixed(4)} * dot( dir, uSunDir ), 1e-4 );
+	float phase = ( 1.0 - g2 ) / ( 12.56637061 * pow( denom, 1.5 ) );
+	phase = min( phase, ${PHASE_PEAK.toFixed(4)} ) - ${PHASE_SIDE.toFixed(6)};
+	if ( phase <= 0.0 ) { gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
 
-	vec2 stepUv = delta * ( uDensity / float( SAMPLES ) );
-	// A fixed tap set leaves concentric rings around the sun; jittering the start
-	// turns them into noise the grain pass then buries.
-	vec2 uv = vUv + stepUv * hash21( gl_FragCoord.xy + uSeed );
+	// Cleared depth unprojects to the far plane, which is the right direction and
+	// a useless distance; either way the march stops where the medium has already
+	// spent itself.
+	float far = min( d >= 0.999995 ? uMaxDist : len, uMaxDist );
+	float dt = far / float( SAMPLES );
+	// Jittering the first step turns the march's own slicing into per-pixel noise
+	// that the reduced-resolution target and the grain then bury. Without it a
+	// sixteen-step march bands a beam into sixteen visible shells.
+	float t = dt * hash21( gl_FragCoord.xy + uSeed );
 
-	vec3 acc = vec3( 0.0 );
-	float w = 1.0;
-	float wsum = 0.0;
-
+	float acc = 0.0;
 	for ( int i = 0; i < SAMPLES; i ++ ) {
-		vec2 s = clamp( uv, vec2( 0.0 ), vec2( 1.0 ) );
-		vec3 rad = min( texture2D( tDiffuse, s ).rgb, vec3( uMaxRadiance ) );
-		// Cleared depth means "no geometry between this point and the atmosphere",
-		// which is a sufficient condition for the air along this tap to be lit and
-		// the only one an exterior needs. It is not a necessary one, and taking it
-		// as necessary is why an interior produced nothing: a room's openings look
-		// out at a wall across the street, never at sky, so every tap failed and the
-		// integral was zero at exactly the pose the technique exists for. What
-		// actually marks air as lit is that the surface behind it is standing in the
-		// sun, and the frame already says which surfaces those are — the sunlit
-		// patch a window throws on the far wall is two decades above the fill around
-		// it. So the mask is a bright pass, with sky as its guaranteed member.
-		float sky = step( 0.999995, texture2D( tDepth, s ).x );
-		float lit = max( sky, smoothstep( uBright.x, uBright.y, dot( rad, vec3( 0.2126, 0.7152, 0.0722 ) ) ) );
-		acc += ( w * lit ) * rad;
-		wsum += w;
-		// Weighting the near taps hardest keeps a shaft attached to the silhouette
-		// that cast it instead of streaking the full radius uniformly.
-		w *= uDecay;
-		uv += stepUv;
+		acc += sunVisibility( uCamPos + dir * t ) * exp( -uSigma * t );
+		t += dt;
 	}
 
-	gl_FragColor = vec4( acc * ( lobe / max( wsum, 1e-4 ) ), 1.0 );
+	gl_FragColor = vec4( uSunRadiance * ( phase * min( acc * uSigma * dt, 1.0 ) ), 1.0 );
 }
 `,
-};
+  };
+}
 
 /**
  * Renders the world into a target this module owns, then blits the result into
@@ -694,14 +738,19 @@ class TemporalAAPass extends Pass {
  * rather than a compositing pass laying them over a finished frame. That also
  * costs one full-screen pass less on a box where every one of them is a second
  * of wall clock. The accumulation itself runs at a fraction of the frame because
- * a shaft is a low-frequency signal; the taps still read the full-resolution
- * depth and colour, so the mask is supersampled rather than blurred.
+ * a shaft is a low-frequency signal; the march still reads the full-resolution
+ * depth and the cascades at their native resolution, so the mask is supersampled
+ * rather than blurred.
+ *
+ * It reads no colour at all any more, so it no longer needs the composer's read
+ * buffer and can be scheduled anywhere after the scene render.
  */
 class LightShaftPass extends Pass {
-  constructor(width, height, scale, samples) {
+  constructor(width, height, scale, samples, cascades) {
     super();
     this.needsSwap = false;
     this._resScale = scale;
+    this.cascades = cascades;
 
     this.target = new THREE.WebGLRenderTarget(
       Math.max(1, Math.round(width * scale)),
@@ -710,12 +759,13 @@ class LightShaftPass extends Pass {
     );
     this.target.texture.name = 'PostFX.shafts';
 
+    const shader = buildLightShaftShader(cascades);
     this.material = new THREE.ShaderMaterial({
-      name: LightShaftShader.name,
+      name: shader.name,
       defines: { SAMPLES: samples },
-      uniforms: THREE.UniformsUtils.clone(LightShaftShader.uniforms),
-      vertexShader: LightShaftShader.vertexShader,
-      fragmentShader: LightShaftShader.fragmentShader,
+      uniforms: shader.uniforms,
+      vertexShader: shader.vertexShader,
+      fragmentShader: shader.fragmentShader,
       depthTest: false,
       depthWrite: false,
       blending: THREE.NoBlending,
@@ -724,8 +774,7 @@ class LightShaftPass extends Pass {
     this._quad = new FullScreenQuad(this.material);
   }
 
-  render(renderer, writeBuffer, readBuffer) {
-    this.uniforms.tDiffuse.value = readBuffer.texture;
+  render(renderer) {
     renderer.setRenderTarget(this.target);
     this._quad.render(renderer);
   }
@@ -796,19 +845,22 @@ export class PostFX {
     this.gradeName = 'default';
 
     /**
-     * Peak shaft radiance as a multiple of the sky's own, before the distance
-     * weighting and before the pass' own open-sky gate.
+     * Scattering albedo of the shaft medium: the fraction of the extinction the
+     * march charges for that comes back as in-scattered light.
      *
-     * 1.35 was calibrated against a mask that could only see sky, which in the two
-     * poses where the disc is occluded returned a hard zero — the gain was free to
-     * be anything because it was multiplying nothing. Now that the mask counts
-     * sunlit surfaces as sources, the same number lifted a shaded plaza by most of
-     * a stop, so it has to be re-derived against a mask that actually fires: a
-     * beam should read as a beam and not as a second exposure. The open-sky case is
-     * unaffected either way, because the pass' own aureole gate has already cut it
-     * to a twelfth by the time this multiplies.
+     * Every earlier value of this was a free gain multiplying a mask that
+     * measured nothing, so none of them carries over. The pass now emits
+     * scene-referred radiance — key irradiance times phase times a normalised
+     * path integral — and this is the only artistic number left in the term.
+     *
+     * At 1.0 the medium would be a pure scatterer and the interior's beam would
+     * arrive at roughly a third of a sunlit facade's radiance, which is a smoke
+     * grenade rather than the dust in a shelled room. A tenth puts the beam at
+     * about 0.03-0.08 of scene radiance where the shaded floor around it sits
+     * near 0.06 — visible as a beam, a stop or so over its surroundings, and
+     * nowhere near the second exposure that a veil reads as.
      */
-    this.shaftStrength = 0.6;
+    this.shaftStrength = 0.1;
 
     /**
      * Airlight path density for the shaft term, as a multiple of the sky's own
@@ -829,7 +881,9 @@ export class PostFX {
      * room; fourteen brings that to 21 m, so an interior keeps a quarter of the term
      * instead of a seventh. It still leaves the foreground protected — two metres of
      * air is 9% of it, which is what stops the weapon and the near cobbles from
-     * picking up a haze they have no air in front of.
+     * picking up a haze they have no air in front of. That figure is no longer a
+     * weighting applied after the fact either: it is the march's own extinction
+     * coefficient, charged step by step along the ray it belongs to.
      */
     this.shaftDust = 14.0;
 
@@ -863,25 +917,14 @@ export class PostFX {
     this._gamma = new THREE.Vector3(1, 1, 1);
     this._gain = new THREE.Vector3(1, 1, 1);
     this._hurtTint = new THREE.Vector3(0.85, 0.06, 0.05);
-    this._sunUv = new THREE.Vector2(0.5, 0.5);
-    this._sunClip = new THREE.Vector4();
     this._camPlanes = new THREE.Vector2(0.08, 900);
     this._aoFade = new THREE.Vector2(90, 260);
-    /**
-     * The shaft mask's bright pass, in scene-referred radiance: below x the pixel
-     * is lit by fill and cannot be a source of a beam, above y it is standing in
-     * direct sun.
-     *
-     * 0.18/0.5 was measured against a key that has since gone up 1.71x and a fill
-     * that has come down to between 0.44 and 0.66 of itself, which moves both ends
-     * of the population this ramp sits between — a sunlit facade from ~0.34 to
-     * ~0.51, a shaded one from ~0.10 to ~0.06. Left where it was, the ramp's foot
-     * would sit in the middle of the *shaded* distribution instead of below it, and
-     * a mask that fires on shade is not a mask: the term stops being beams and
-     * becomes the whole-frame veil the post axis fails for. Scaled with the light
-     * it is measuring rather than re-guessed.
-     */
-    this._shaftBright = new THREE.Vector2(0.26, 0.72);
+    // Handed to the shaft march every frame: the sun as Lighting is currently
+    // driving it, and the per-cascade depth bias derived from each cascade's own
+    // ortho range. Shared objects, so update() stays allocation-free.
+    this._shaftSunDir = new THREE.Vector3(0, 1, 0);
+    this._shaftRadiance = new THREE.Vector3();
+    this._shaftBias = new THREE.Vector4(0.002, 0.002, 0.002, 0.002);
 
     this._projClean = new THREE.Matrix4();
     this._viewProjClean = new THREE.Matrix4();
@@ -1117,16 +1160,21 @@ export class PostFX {
       this.composer.addPass(bloom);
     }
 
-    // Shafts need the sun to be occluded by something, which means they need the
-    // depth buffer; without it the chain has no way to know what is in shadow.
-    if (wantsDepth && settings.volumetrics) {
-      // Software rasterisers pay per tap, and the mask is the one part of the
-      // chain whose output is smooth enough to survive being run small.
-      const shafts = new LightShaftPass(w, h, software ? 0.25 : 0.34, software ? 14 : 20);
+    // The march needs the eye ray's world position, which means the depth buffer,
+    // and it needs somewhere to ask whether a point is in sun, which means the
+    // cascades. Without either there is no shaft term at all — better than a pass
+    // that runs and returns nothing, which is what the last four rounds shipped.
+    const cascades = Math.min(4, this.game.lighting?.csm?.count ?? 0);
+    if (wantsDepth && settings.volumetrics && cascades > 0) {
+      // Software rasterisers pay per tap, and a shaft is a low-frequency signal:
+      // it is the one part of the chain whose output survives being run small.
+      const shafts = new LightShaftPass(w, h, software ? 0.25 : 0.34, software ? 16 : 24, cascades);
       shafts.uniforms.tDepth.value = this.depthTexture;
-      shafts.uniforms.uSunUv.value = this._sunUv;
-      shafts.uniforms.uBright.value = this._shaftBright;
-      shafts.uniforms.uAspect.value = w / h;
+      shafts.uniforms.uInvViewProj.value = this._invViewProj;
+      shafts.uniforms.uCamPos.value = camera.position;
+      shafts.uniforms.uSunDir.value = this._shaftSunDir;
+      shafts.uniforms.uSunRadiance.value = this._shaftRadiance;
+      shafts.uniforms.uCsmBias.value = this._shaftBias;
       this.shafts = shafts;
       this.composer.addPass(shafts);
     }
@@ -1141,8 +1189,6 @@ export class PostFX {
     grade.uniforms.uTexel.value = this._texel;
     grade.uniforms.tViewmodel.value = viewmodel.target.texture;
     grade.uniforms.tShaft.value = this.shafts ? this.shafts.target.texture : null;
-    grade.uniforms.tDepth.value = this.depthTexture;
-    grade.uniforms.uCamPlanes.value = this._camPlanes;
     grade.uniforms.uShadowTint.value = this._shadowTint;
     grade.uniforms.uHighTint.value = this._highTint;
     grade.uniforms.uSplit.value = this._split;
@@ -1262,14 +1308,16 @@ export class PostFX {
   }
 
   /**
-   * Point the shaft pass at the sun and decide how much of it survives.
+   * Hand the shaft march this frame's sun and this frame's cascades.
    *
-   * A directional light has no position to project, but it does have a vanishing
-   * point: transform the *direction* (w = 0) and the perspective divide lands on
-   * the pixel every parallel sun ray converges toward. Behind the camera that
-   * point is meaningless, and far enough off-frame the radial direction stops
-   * agreeing with the real shadow volume, so both fade the effect out rather than
-   * snapping it off — a shaft that vanishes on a pan reads as a bug.
+   * Everything the term needs to know about direction is now in the phase
+   * function, which is evaluated per pixel against that pixel's own view ray, so
+   * there is nothing here that fades the effect in or out by where the sun's
+   * vanishing point lands on screen. What remains is binding: a cascade's shadow
+   * map is allocated on its first shadow render and reallocated whenever the
+   * cascade count or map size changes, and its matrix is only refreshed on the
+   * frames that cascade actually redraws — so both are re-read every frame rather
+   * than captured when the chain was built.
    */
   _updateShafts() {
     const grade = this.gradePass;
@@ -1279,41 +1327,47 @@ export class PostFX {
     // is kept current whether or not the shaft pass exists.
     this._camPlanes.set(this.game.camera.near, this.game.camera.far);
 
+    const csm = this.game.lighting?.csm;
     const dir = this.game.sky?.sunDirection;
-    if (!this.shafts || !dir) {
+    const sun = csm?.sun;
+    if (!this.shafts || !dir || !sun) {
       grade.uniforms.uShaft.value = 0;
+      if (this.shafts) this.shafts.enabled = false;
       return;
     }
 
+    const u = this.shafts.uniforms;
+    const ranges = csm.uniforms.uCsmRange.value;
+    let bound = csm.count >= this.shafts.cascades;
+    for (let i = 0; bound && i < this.shafts.cascades; i++) {
+      const light = csm.lights[i];
+      const map = light.shadow.map?.texture;
+      if (!map) {
+        bound = false;
+        break;
+      }
+      u[`tCsm${i}`].value = map;
+      u[`uCsmMat${i}`].value = light.shadow.matrix;
+      this._shaftBias.setComponent(i, SHAFT_BIAS_M / Math.max(ranges.getComponent(i), 1));
+    }
+
+    // Below the horizon there is no direct beam left to be occluded. The key's own
+    // intensity already goes to zero there, so this only stops the last few
+    // hundredths of a stop of dusk from marching for nothing.
+    const daylight = THREE.MathUtils.clamp(dir.y * 12, 0, 1);
+    const s = this.shaftStrength * daylight;
+    this.shafts.enabled = bound && s > 0.002;
+    grade.uniforms.uShaft.value = this.shafts.enabled ? s : 0;
+    if (!this.shafts.enabled) return;
+
+    // The beam is the key light seen side-on, so it is the key light's colour and
+    // the key light's irradiance — not a second opinion about either.
+    this._shaftSunDir.copy(dir);
+    this._shaftRadiance.set(sun.color.r, sun.color.g, sun.color.b).multiplyScalar(sun.intensity);
+
     const density = this.game.sky?.params?.aerialDensity;
-    if (density > 0) grade.uniforms.uShaftPath.value = density * this.shaftDust;
-
-    this._sunClip.set(dir.x, dir.y, dir.z, 0).applyMatrix4(this._viewProjClean);
-    const w = this._sunClip.w;
-    if (w > 1e-4) {
-      const nx = this._sunClip.x / w;
-      const ny = this._sunClip.y / w;
-      this._sunUv.set(nx * 0.5 + 0.5, ny * 0.5 + 0.5);
-      const off = Math.max(Math.abs(nx), Math.abs(ny));
-      // Below the horizon there is no direct beam left to be occluded.
-      const daylight = THREE.MathUtils.clamp(dir.y * 12, 0, 1);
-      // A vanishing point off the edge of the frame is still the point every sun
-      // ray converges toward, and a room lit through a window it cannot see is
-      // exactly the case that needs the pass. Only the lobe's own exponential
-      // should decide where the term dies; this gate is the far backstop, and at
-      // 1.0 it was cutting the effect off inside the frustum's own diagonal.
-      const s = this.shaftStrength * daylight * (1 - THREE.MathUtils.smoothstep(off, 1.2, 3.2));
-      this.shafts.enabled = s > 0.002;
-      grade.uniforms.uShaft.value = s;
-    } else {
-      this.shafts.enabled = false;
-      grade.uniforms.uShaft.value = 0;
-    }
-
-    if (this.shafts.enabled) {
-      this.shafts.uniforms.uAspect.value = this._size.x / this._size.y;
-      this.shafts.uniforms.uSeed.value = (this._grainTime * 61) % 1000;
-    }
+    if (density > 0) u.uSigma.value = density * this.shaftDust;
+    u.uSeed.value = (this._grainTime * 61) % 1000;
   }
 
   /* ------------------------------------------------------------------ render */

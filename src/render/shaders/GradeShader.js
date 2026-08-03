@@ -97,14 +97,10 @@ export const GradeShader = {
     // accumulated sun-occlusion buffer and this pass adds it in before exposure
     // so it goes through the tone curve with everything else.
     tShaft: { value: null },
-    tDepth: { value: null },
+    // Scattering albedo of the shaft medium. The buffer is already scene-referred
+    // radiance with its own extinction integrated along the eye ray, so this is
+    // the last scalar and nothing here re-weights it by depth.
     uShaft: { value: 0 },
-    // 1/metres; the depth over which the shaft's airlight saturates. PostFX derives
-    // this from the sky's own aerial density each frame so the two atmosphere terms
-    // cannot disagree about the air between the eye and a surface; the default is
-    // that same figure under the default weather, for anyone driving the pass alone.
-    uShaftPath: { value: 1 / 24 },
-    uCamPlanes: { value: null },
 
     uExposure: { value: 1 },
     uContrast: { value: 1.18 },
@@ -142,10 +138,7 @@ uniform vec2 uTexel;
 uniform float uTime;
 
 uniform sampler2D tShaft;
-uniform sampler2D tDepth;
 uniform float uShaft;
-uniform float uShaftPath;
-uniform vec2 uCamPlanes;
 
 uniform float uExposure;
 uniform float uContrast;
@@ -277,17 +270,13 @@ void main() {
 	// 1.0 at the edge midpoints, 1.414 in the corners.
 	float rn = length( fromCentre ) * 2.0;
 
-	// In-scattered sunlight is proportional to how much air the eye ray crossed
-	// before it hit something, which is what keeps the shafts off near geometry:
-	// a surface two metres away has almost no air in front of it, the far band and
-	// the sky have all of it. Same shape as the aerial term in Sky, and now driven
-	// off the same density, so a change of weather moves both together.
-	vec3 shaft = vec3( 0.0 );
-	if ( uShaft > 0.0 ) {
-		float d = texture2D( tDepth, vUv ).x;
-		float dist = ( uCamPlanes.x * uCamPlanes.y ) / ( uCamPlanes.y - ( uCamPlanes.y - uCamPlanes.x ) * d );
-		shaft = texture2D( tShaft, vUv ).rgb * uShaft * ( 1.0 - exp( -dist * uShaftPath ) );
-	}
+	// In-scattered sunlight, added as radiance so it goes through the same tone
+	// curve as the surfaces it sits between. This used to be re-weighted here by
+	// the pixel's own depth, standing in for an extinction integral the old
+	// screen-space pass could not compute; the march does compute it, one step at
+	// a time along the real eye ray, so weighting it again would charge the same
+	// air twice and pull the near field to zero on top of that.
+	vec3 shaft = uShaft > 0.0 ? texture2D( tShaft, vUv ).rgb * uShaft : vec3( 0.0 );
 
 	vec3 col = gradeAt( vUv, shaft );
 

@@ -1182,9 +1182,20 @@ export const MATERIAL_RECIPES = {
         // steel, so metalness stays 1 and only albedo and roughness change. Wear
         // is tight and follows the machining marks — a soft cloud of it reads as
         // frost on the receiver.
-        const worn = smoothstep(0.76, 0.95, wear[i] * 0.75 + turn[i] * 0.35);
-        b.rgb(i, ...mixc(blued, steel, worn));
-        b.rough[i] = rgh(0.2 + turn[i] * 0.07 - worn * 0.07 + scratch[i] * 0.12);
+        // The gate was 0.76-0.95 against a field that rarely reaches it, so
+        // almost no texel came through worn and the barrel read as one clean gloss
+        // at any magnification. Opening it to 0.52 went straight past the target
+        // and turned blued steel into chrome -- caught by looking at the frame,
+        // not at the statistics, which were happily reporting more contrast. This
+        // sits between the two: wear common enough to see, capped at 0.85 so the
+        // oxide always remains the substance underneath it.
+        const worn = smoothstep(0.70, 0.93, wear[i] * 0.8 + turn[i] * 0.36);
+        // Scratches cut through the oxide to bright steel. They have to move
+        // ALBEDO to be visible -- roughness alone changes only the highlight's
+        // width, which at a distance is no change at all.
+        const cut = smoothstep(0.80, 0.96, scratch[i]);
+        b.rgb(i, ...mixc(blued, steel, Math.min(0.85, worn + cut * 0.5)));
+        b.rough[i] = rgh(0.2 + turn[i] * 0.07 - worn * 0.09 - cut * 0.08 + scratch[i] * 0.12);
         b.metal[i] = 1;
       });
     },
@@ -1215,9 +1226,12 @@ export const MATERIAL_RECIPES = {
         b.height[i] = 0.55 + (blast[i] - 0.5) * 0.07 - rail[i] * 0.04;
         // Type III anodising is a hard matte oxide over aluminium; where it has
         // rubbed through, the bright metal shows and the roughness drops hard.
-        const through = smoothstep(0.84, 0.97, edge[i] * 0.8 + rail[i] * 0.35);
+        // Same correction as bluing: anodising rubs through at the rail edges and
+        // the magazine well long before it goes anywhere else, and a 0.84 gate let
+        // almost none of that reach the screen.
+        const through = smoothstep(0.74, 0.94, edge[i] * 0.85 + rail[i] * 0.4);
         b.rgb(i, ...mixc(anod, alu, through));
-        b.rough[i] = rgh(0.46 + blast[i] * 0.1 - through * 0.24);
+        b.rough[i] = rgh(0.46 + blast[i] * 0.1 - through * 0.28);
         b.metal[i] = 1;
       });
     },

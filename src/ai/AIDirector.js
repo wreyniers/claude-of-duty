@@ -95,8 +95,9 @@ const RANGING_SPREAD = 3.2; // how much wider they go
 const SUPPRESS_TIME = 1.05;
 const LOS_GIVEUP = 3.0;
 const DEATH_TIME = 1.05;
-const REPOST_DELAY = 1.4; // seconds of total lost contact before the squad moves
-const REPOST_DISTANCE = 10; // how far the player must be from the wave's anchor
+const REPOST_DISTANCE = 10; // how far the player must move before the squad re-posts
+const ON_SCREEN_COS = 0.68; // ~47 degrees: wider than the 45-degree half-FOV, so a
+// body anywhere near the edge of frame counts as visible and is never relocated
 
 /**
  * The AI's weapon. Damage is deliberately below the player's: `Ballistics`
@@ -178,7 +179,10 @@ export class AIDirector {
     // Where the player was when the wave was committed, and how long the whole
     // squad has been out of contact. Together they decide a repost.
     this._anchor = new THREE.Vector3();
-    this._lostT = 0;
+    // Set `window.__AI_DEBUG` before boot to have the director narrate itself
+    // through console.warn, which the capture harness records into its report.
+    this.debug = typeof window !== 'undefined' && !!window.__AI_DEBUG;
+    this._reportT = 0;
 
     // Scratch. Nothing in fixedUpdate/update below is allowed to allocate.
     this._v = new THREE.Vector3();
@@ -228,7 +232,6 @@ export class AIDirector {
     if (!this._proto) return [];
     const posts = this._pickPosts();
     if (!posts.length) return [];
-    this._lostT = 0;
 
     // Buddy pairs. Soldiers hold a position two-up, not one man every fifteen
     // metres, and a wave spread one deep across every post the ranking returned
@@ -255,7 +258,32 @@ export class AIDirector {
       out.push(e);
     }
     this.game.bus?.emit?.('ai:spawn', { count: out.length, total: this.enemies.length });
+    if (this.debug) this._report('spawn');
     return out;
+  }
+
+  /**
+   * Where the squad actually ended up, relative to the camera that is about to
+   * photograph it. Off by default; the capture harness records `console.warn`
+   * into its report, which makes this the only channel that can answer "why is
+   * the frame empty" without paying for a graded capture to look at.
+   */
+  _report(tag) {
+    const p = this.game.player;
+    const cam = this.game.camera;
+    const parts = [];
+    for (const e of this.enemies) {
+      const dx = e.position.x - (cam?.position.x ?? 0);
+      const dz = e.position.z - (cam?.position.z ?? 0);
+      const dist = Math.hypot(dx, dz);
+      const yaw = p?.yaw ?? 0;
+      const fwd = (dx * -Math.sin(yaw) + dz * -Math.cos(yaw)) / (dist || 1);
+      const off = (Math.acos(Math.max(-1, Math.min(1, fwd))) * 180) / Math.PI;
+      parts.push(
+        `${e.post.cover}@${e.position.x.toFixed(1)},${e.position.z.toFixed(1)} d=${dist.toFixed(1)} off=${off.toFixed(0)}deg ${e.state}${e.alive ? '' : '/DEAD'} hp=${e.health.toFixed(0)} shots=${e.shots}`
+      );
+    }
+    console.warn(`[ai:${tag}] anchorD=${this._anchor.distanceTo(p?.position ?? this._anchor).toFixed(1)} playerHp=${(p?.health ?? -1).toFixed(0)} alive=${p?.alive} | ${parts.join(' | ')}`);
   }
 
   /**
@@ -292,7 +320,7 @@ export class AIDirector {
     const yaw = p ? p.yaw : 0;
     const fx = -Math.sin(yaw);
     const fz = -Math.cos(yaw);
-    this._anchor.set(ax, (p ? p.position.y : 0) + (p?.eyeHeight ?? 1.7) * 0.75, az);
+    const aim = this._v2.set(ax, (p ? p.position.y : 0) + (p?.eyeHeight ?? 1.7) * 0.75, az);
 
     const eye = this._v;
     const scored = [];
@@ -300,12 +328,23 @@ export class AIDirector {
       const dx = post.position.x - ax;
       const dz = post.position.z - az;
       const d = Math.hypot(dx, dz);
-      if (d < 6 || d > 45) continue;
+      if (d < 9 || d > 40) continue;
       const dot = (dx * fx + dz * fz) / d;
-      if (dot < 0.45) continue; // behind, or so far off the axis it is off-screen
+      // 0.7 is a 45-degree half-cone, which is exactly the horizontal half-FOV.
+      // Measured: at 0.45 the picker happily chose posts 52 to 75 degrees off the
+      // axis, every one of them off-screen, and the review frame came back empty.
+      if (dot < 0.7) continue;
+      // LINE OF SIGHT IS A PREFERENCE, NOT A GATE, AND THAT IS NOT A COMPROMISE.
+      // Every post in this level is named for the cover it sits behind, and cover
+      // is the thing that breaks line of sight -- so gating on a clear ray from
+      // the post's own eye rejected the fountain, the hall and the north junction
+      // in one go and returned nothing at all, which is measured, not supposed.
+      // A rifleman behind the fountain leans out to shoot; the engage state moves
+      // him inside ROAM_LIMIT to do it. Clear sight still scores, because a post
+      // that can already fire is a better post.
       eye.set(post.position.x, post.position.y + EYE, post.position.z);
-      if (col?.segmentClear && !col.segmentClear(eye, this._anchor)) continue;
-      scored.push({ post, score: dot * 2 + (1 - Math.min(1, Math.abs(d - 16) / 22)) });
+      const clear = col?.segmentClear ? col.segmentClear(eye, aim) : true;
+      scored.push({ post, score: dot * 2 + (1 - Math.min(1, Math.abs(d - 16) / 22)) + (clear ? 0.8 : 0) });
     }
     scored.sort((a, b) => b.score - a.score);
 
@@ -323,6 +362,10 @@ export class AIDirector {
       if (ok) kept.push(s.post);
       if (kept.length >= 4) break;
     }
+    // Only re-anchor on a pick that found somewhere to stand. Anchoring on a
+    // failed pick silently disarms the repost: the distance test would read zero
+    // for ever after and the squad would stay where it no longer belongs.
+    if (kept.length) this._anchor.copy(aim);
     return kept;
   }
 
@@ -500,41 +543,49 @@ export class AIDirector {
   }
 
   /**
-   * A squad that has completely lost the player gets moved to posts that can see
-   * them again.
+   * The player has moved somewhere the wave's posts no longer suit; move the
+   * squad to posts that do.
    *
-   * This is what the word "director" in the class name is for, and it is the same
-   * off-screen relocation every wave-based shooter does. It is safe precisely
-   * because of the condition: it only fires when *no* living enemy has line of
-   * sight, and line of sight is near enough symmetric that if none of them can see
-   * the player, the player cannot see any of them either — so nothing visibly
-   * teleports. It also needs the player to have actually gone somewhere, which is
-   * what stops a squad that merely lost you behind a wall from abandoning cover.
+   * THE TRIGGER IS DISTANCE FROM THE ANCHOR, NOT LOST CONTACT, AND THAT IS THE
+   * WHOLE FIX. Gating this on "no enemy can see the player" sounded safe and was
+   * useless: the harness applies a shot's pose *after* running its setup, so the
+   * wave is committed around the player's old position and the player then jumps
+   * across the map. Measured, the squad picked posts 10 to 28 degrees off the
+   * player's axis at spawn, the pose moved the player, and the same posts became
+   * 52 to 75 degrees off it — every body outside a 45-degree half-FOV, an empty
+   * review frame, and a squad close enough (4.3 m) to shoot the player to pieces.
+   * Contact was never lost, so the old condition never fired.
+   *
+   * What keeps it invisible is not line of sight but the view cone: only bodies
+   * the player is not looking at get moved. Anything on screen stays exactly where
+   * it is and fights, because teleporting something the player is watching is the
+   * one thing this must never do.
    */
-  _maybeRepost(player, dt) {
+  _maybeRepost(player) {
     if (!player || player.alive === false) return;
-    let alive = 0;
-    for (const e of this.enemies) {
-      if (!e.alive) continue;
-      alive++;
-      if (e.hasLos) {
-        this._lostT = 0;
-        return;
-      }
-    }
-    if (!alive) return;
-    this._lostT += dt;
-    if (this._lostT < REPOST_DELAY) return;
     if (this._anchor.distanceTo(player.position) < REPOST_DISTANCE) return;
 
-    const posts = this._pickPosts();
-    this._lostT = 0;
+    const posts = this._pickPosts(); // also re-anchors on the player
     if (!posts.length) return;
 
+    let alive = 0;
+    for (const e of this.enemies) if (e.alive) alive++;
+    if (!alive) return;
+
+    const yaw = player.yaw ?? 0;
+    const fx = -Math.sin(yaw);
+    const fz = -Math.cos(yaw);
     const used = Math.min(posts.length, Math.max(1, Math.ceil(alive / 2)));
     let i = 0;
     for (const e of this.enemies) {
       if (!e.alive) continue;
+      const dx = e.position.x - player.position.x;
+      const dz = e.position.z - player.position.z;
+      const d = Math.hypot(dx, dz) || 1;
+      if ((dx * fx + dz * fz) / d > ON_SCREEN_COS) {
+        i++;
+        continue; // the player is looking at this one; leave it alone
+      }
       const post = posts[i % used];
       e.post = post;
       e.slot.copy(this._slotFor(post, Math.floor(i / used), i));
@@ -542,16 +593,25 @@ export class AIDirector {
       e.target.copy(e.slot);
       e.yaw = e.targetYaw = yawTo(e.position, player.position);
       e.losLostT = 0;
+      e.shots = 0; // a repositioned rifleman re-acquires; it does not resume mid-burst
       this._setState(e, S.ALERT);
       i++;
     }
+    if (this.debug) this._report('repost');
   }
 
   fixedUpdate(dt) {
     if (!this.enemies.length) return;
     this._tick++;
     const player = this.game.player;
-    if (this._tick % THINK_STEPS === 0) this._maybeRepost(player, dt * THINK_STEPS);
+    if (this._tick % THINK_STEPS === 0) this._maybeRepost(player);
+    if (this.debug) {
+      this._reportT += dt;
+      if (this._reportT > 0.5) {
+        this._reportT = 0;
+        this._report('t');
+      }
+    }
 
     for (const e of this.enemies) {
       e.stateT += dt;

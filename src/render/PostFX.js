@@ -860,7 +860,14 @@ export class PostFX {
      * near 0.06 — visible as a beam, a stop or so over its surroundings, and
      * nowhere near the second exposure that a veil reads as.
      */
-    this.shaftStrength = 0.1;
+    // 0.45, measured rather than chosen by eye. A/B at the interior review pose,
+    // 32x32 tiles, shaft term off versus on: the largest tile moves +21.7 levels on
+    // a base of 138 and a shadowed tile +12.5 on a base of 34, all of the top
+    // deltas clustered in one coherent region around the apertures. The previous
+    // screen-space pass moved the frame by 0.3 levels at this strength and 1.3 at
+    // eight times it, which is what "the effect does not exist" looks like in
+    // numbers. 0.1 would have put this one back in that territory.
+    this.shaftStrength = 0.45;
 
     /**
      * Airlight path density for the shaft term, as a multiple of the sky's own

@@ -533,9 +533,10 @@ void main() {
 	float t = dt * hash21( gl_FragCoord.xy + uSeed );
 
 	float acc = 0.0;
-	// Raw visibility, unweighted, purely to learn whether this ray crossed a beam
-	// edge. See the isotropic floor below.
-	float vis = 0.0;
+	// Visibility inside the near shell only, purely to learn whether this ray crossed
+	// a beam edge in the dense air. See the isotropic floor below.
+	float visNear = 0.0;
+	float nNear = 0.0;
 	for ( int i = 0; i < SAMPLES; i ++ ) {
 		// One global sigma was charging the interior's particulate density over the
 		// entire eighty-metre march, so every exterior surface past forty metres
@@ -547,7 +548,7 @@ void main() {
 		// of the march runs at the atmosphere's own density.
 		float sig = t < uNearShell ? uSigma : uSigmaFar;
 		float v = sunVisibility( uCamPos + dir * t );
-		vis += v;
+		if ( t < uNearShell ) { visNear += v; nNear += 1.0; }
 		acc += v * exp( -sig * t );
 		t += dt;
 	}
@@ -560,13 +561,19 @@ void main() {
 	// can be live at full strength and still be invisible. Real scattering is not
 	// purely forward: there is a floor of roughly 1/4pi in every direction.
 	//
-	// Applied only where the ray actually crossed a beam edge. 4*f*(1-f) peaks at
-	// an even split of lit and shadowed samples and falls to zero when a ray is
-	// wholly in sun or wholly in shade, which is exactly the condition that makes a
-	// shaft a shaft rather than a wash. Without that gate this floor would lay a
-	// broad glow over every exterior -- the defect this pass was just rescued from.
-	float f = vis / float( SAMPLES );
-	float edge = 4.0 * f * ( 1.0 - f );
+	// Applied only where the ray crossed a beam edge INSIDE THE DENSE NEAR FIELD.
+	// 4*f*(1-f) peaks at an even split of lit and shadowed samples and falls to zero
+	// when a ray is wholly in sun or wholly in shade, which is the condition that
+	// makes a shaft a shaft rather than a wash.
+	//
+	// Measuring that over the whole march was not enough: outdoors, any ray grazing a
+	// building's shadow reads as mixed, and the floor lifted the vista's midground by
+	// thirty levels -- the exact wash this pass had just been rescued from. Scattering
+	// this strong is a property of the dust in the room you are standing in, so both
+	// the split and the weight are confined to the near shell, and a march that barely
+	// enters it barely gets the term.
+	float f = nNear > 0.0 ? visNear / nNear : 1.0;
+	float edge = 4.0 * f * ( 1.0 - f ) * ( nNear / float( SAMPLES ) );
 	float phase = max( phaseFwd, 0.0796 * edge );
 	if ( phase <= 0.0 ) { gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
 

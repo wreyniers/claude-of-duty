@@ -1166,7 +1166,13 @@ export const MATERIAL_RECIPES = {
       const turn = b.fbm({ freq: 3, freqY: 96, octaves: 2 });
       const wear = b.warp(b.fbm({ freq: 4, octaves: 4, seed: 12 }), { freq: 3, amount: b.size * 0.04 });
       const scratch = b.fbm({ freq: 80, freqY: 5, octaves: 2, seed: 3 });
-      const blued = lin(0x15171b);
+      // 0x15171b was a reflectance of about 0.007. On a metal the albedo *is* F0,
+      // so that is an order of magnitude below plastic's 0.04 and the surface
+      // returns almost nothing: a review measured the weapon body at luma 14 and
+      // read the whole rig as injection-moulded ABS, which is generous — a
+      // dielectric would have been brighter. Gun bluing is an oxide over steel and
+      // reflects in the 0.2-0.3 range; dark for a metal, nowhere near black.
+      const blued = lin(0x33383e);
       const steel = lin(0x8c9095);
       b.normalStrength = 0.3;
       b.aoRelief = 0.15;
@@ -1198,7 +1204,10 @@ export const MATERIAL_RECIPES = {
       // visibly the lighter of the two — which is the one value step separating a
       // rail from the barrel under it. At 0x20 that step was under two levels out
       // of the tone curve and the whole upper receiver read as one part.
-      const anod = lin(0x2e3134);
+      // Same correction, one step lighter: anodising is a dyed oxide over
+      // aluminium and sits above bluing, which is what separates the receiver from
+      // the barrel when both are in shade.
+      const anod = lin(0x484d53);
       const alu = lin(0xb9bdc1);
       b.normalStrength = 0.4;
       b.aoRelief = 0.2;

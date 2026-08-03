@@ -410,6 +410,10 @@ export class AIDirector {
       thinkPhase: index % THINK_STEPS,
       hitboxes: [],
       hitGroup: null,
+      // The pose actually written to the scene graph. `update` compares against
+      // this and skips the whole write when nothing moved; NaN-initialised so the
+      // first frame never matches.
+      applied: { px: NaN, py: NaN, pz: NaN, yaw: NaN, aim: NaN, up: NaN, pelvisY: NaN, chestYaw: NaN, lead: NaN, amp: NaN, phase: NaN, crouch: NaN, death: NaN },
       // Base pose, in radians. Animation is a delta on these so a walk cycle or a
       // flinch never fights the stance the body was authored standing in.
       base: {
@@ -504,8 +508,13 @@ export class AIDirector {
       const step = TURN_RATE * dt;
       e.yaw += Math.abs(d) <= step ? d : Math.sign(d) * step;
 
-      e.hitGroup.position.copy(e.position);
-      e.hitGroup.rotation.y = e.yaw;
+      // Same reasoning as `update`: only write when it actually moved. These are
+      // outside the scene so they cost no raster, but a needless matrix rebuild
+      // per body per fixed step is 480 a second for nothing.
+      if (e.hitGroup.position.x !== e.position.x || e.hitGroup.position.z !== e.position.z || e.hitGroup.rotation.y !== e.yaw) {
+        e.hitGroup.position.copy(e.position);
+        e.hitGroup.rotation.y = e.yaw;
+      }
     }
   }
 
@@ -721,37 +730,86 @@ export class AIDirector {
 
   /* ---------------------------------------------------------- presentation */
 
+  /**
+   * A SETTLED BODY WRITES NOTHING, AND THAT IS A PERFORMANCE FIX, NOT TIDINESS.
+   *
+   * Measured: with four enemies animating unconditionally, the silhouette pose's
+   * `settle(60)` never finished inside the harness's 1200 s ceiling, with the
+   * SwiftShader process pegged at 350% and the JavaScript renderer idle at 4% —
+   * so it was rasterising, not looping. ARCHITECTURE's note explains why: frames
+   * nobody reads are largely elided, and a settle loop is nearly free *as long as
+   * the frame does not change*. Forty-four transform writes per body per frame
+   * kept the scene permanently dirty and turned sixty free frames into sixty real
+   * ones.
+   *
+   * Every driver here converges exactly rather than asymptotically — `approach`
+   * snaps to the target inside one step of it, and the yaw slew is clamped the
+   * same way — so once a body is standing still on its post with the target
+   * acquired, the computed pose is bit-identical frame to frame and the whole
+   * write is skipped. Which is also just true: a soldier holding a firing
+   * position is not animating.
+   */
   update(dt) {
     if (!this.enemies.length) return;
     const d = Math.min(dt, 0.1);
 
     for (const e of this.enemies) {
       const p = e.parts;
-      e.root.position.copy(e.position);
-      e.root.rotation.y = e.yaw;
+      const a = e.applied;
 
       if (e.state === S.DEAD) {
+        if (a.death === e.deathT && a.px === e.position.x && a.pz === e.position.z && a.yaw === e.yaw) continue;
+        e.root.position.copy(e.position);
+        e.root.rotation.y = e.yaw;
         this._poseDeath(e);
+        a.death = e.deathT;
+        a.px = e.position.x;
+        a.py = e.position.y;
+        a.pz = e.position.z;
+        a.yaw = e.yaw;
         continue;
       }
-
-      // Weapon carry: one pivot above the shoulder line takes both arms and the
-      // rifle together, which is the whole reason low-ready and shouldered are the
-      // same rig. Rotating the arms alone would tear the hands off the handguard.
-      if (p.aim) p.aim.rotation.x = 0.62 * (1 - e.weaponUp) - e.aimPitch * e.weaponUp;
 
       // Crouch under fire, and settle back down. Read off the state rather than
       // keyed, so it holds for as long as the state does.
       const crouch = e.state === S.SUPPRESSED ? 0.17 : 0;
-      if (p.pelvis) {
-        p.pelvis.position.y = approach(p.pelvis.position.y, 0.93 - crouch, d * 6);
-        p.pelvis.rotation.y = Math.sin(e.walkPhase) * 0.06 * clamp01(e.speed);
-      }
+      const pelvisY = approach(p.pelvis ? p.pelvis.position.y : 0.93, 0.93 - crouch, d * 6);
       // The hips carry the stance bias, so the shoulders have to come back off it
       // or the rifle would point wherever the feet do. Three quarters of the way,
       // not all of it: a shooter's shoulders sit slightly open too, and that
       // residual is what keeps the chest from reading as a flat plate.
       const chestYaw = e.base.chestYaw * (1 - e.weaponUp) - e.stanceBias * 0.75 * e.weaponUp;
+      const lead = THREE.MathUtils.clamp(wrapPi(e.targetYaw - e.yaw), -0.7, 0.7);
+      const amp = clamp01(e.speed / MOVE_SPEED);
+
+      if (
+        a.px === e.position.x &&
+        a.py === e.position.y &&
+        a.pz === e.position.z &&
+        a.yaw === e.yaw &&
+        a.aim === e.aimPitch &&
+        a.up === e.weaponUp &&
+        a.pelvisY === pelvisY &&
+        a.chestYaw === chestYaw &&
+        a.lead === lead &&
+        a.amp === amp &&
+        a.phase === e.walkPhase &&
+        a.crouch === crouch
+      ) {
+        continue;
+      }
+
+      e.root.position.copy(e.position);
+      e.root.rotation.y = e.yaw;
+
+      // Weapon carry: one pivot above the shoulder line takes both arms and the
+      // rifle together, which is the whole reason low-ready and shouldered are the
+      // same rig. Rotating the arms alone would tear the hands off the handguard.
+      if (p.aim) p.aim.rotation.x = 0.62 * (1 - e.weaponUp) - e.aimPitch * e.weaponUp;
+      if (p.pelvis) {
+        p.pelvis.position.y = pelvisY;
+        p.pelvis.rotation.y = Math.sin(e.walkPhase) * 0.06 * amp;
+      }
       if (p.chest) {
         p.chest.rotation.y = chestYaw;
         p.chest.rotation.x = e.base.chestPitch + crouch * 1.4;
@@ -759,20 +817,31 @@ export class AIDirector {
       // The head leads the turn, which is the cheapest thing that makes a body
       // look like it is paying attention rather than being rotated by a script.
       if (p.head) {
-        const lead = wrapPi(e.targetYaw - e.yaw);
-        p.head.rotation.y = -chestYaw * 0.6 + THREE.MathUtils.clamp(lead, -0.7, 0.7);
+        p.head.rotation.y = -chestYaw * 0.6 + lead;
         p.head.rotation.x = -e.aimPitch * 0.5;
       }
 
       // Walk cycle. Amplitude follows speed so a standing body is genuinely still
       // rather than idling on the spot at one percent.
-      const amp = clamp01(e.speed / MOVE_SPEED);
       const sw = Math.sin(e.walkPhase) * 0.62 * amp;
       const sw2 = Math.sin(e.walkPhase + Math.PI) * 0.62 * amp;
       if (p.thigh_l) p.thigh_l.rotation.x = e.base.thighL + sw;
       if (p.thigh_r) p.thigh_r.rotation.x = e.base.thighR + sw2;
       if (p.shin_l) p.shin_l.rotation.x = e.base.shinL + Math.max(0, -sw) * 1.1;
       if (p.shin_r) p.shin_r.rotation.x = e.base.shinR + Math.max(0, -sw2) * 1.1;
+
+      a.px = e.position.x;
+      a.py = e.position.y;
+      a.pz = e.position.z;
+      a.yaw = e.yaw;
+      a.aim = e.aimPitch;
+      a.up = e.weaponUp;
+      a.pelvisY = pelvisY;
+      a.chestYaw = chestYaw;
+      a.lead = lead;
+      a.amp = amp;
+      a.phase = e.walkPhase;
+      a.crouch = crouch;
     }
   }
 
@@ -918,7 +987,11 @@ function sph(r, w = 8, h = 6) {
   return new THREE.SphereGeometry(r, w, h);
 }
 
-/** Cylinder along Z: `rNear` at +Z, `rFar` at -Z, so it pairs with `_axis` below. */
+/**
+ * Cylinder along Z: `rNear` at +Z, `rFar` at -Z. That ordering is what makes
+ * `limb(a, b, rA, rB)` read the way a caller expects — `Matrix4.lookAt` puts the
+ * geometry's -Z on the target, so the +Z end is the one that lands at `a`.
+ */
 function tubeZ(rNear, rFar, len, seg = 8) {
   const g = new THREE.CylinderGeometry(rFar, rNear, len, seg, 1);
   g.rotateX(-Math.PI / 2);

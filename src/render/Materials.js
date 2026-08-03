@@ -1164,7 +1164,12 @@ export const MATERIAL_RECIPES = {
     mat: { envMapIntensity: 1.3 },
     build(b) {
       const turn = b.fbm({ freq: 3, freqY: 96, octaves: 2 });
-      const wear = b.warp(b.fbm({ freq: 4, octaves: 4, seed: 12 }), { freq: 3, amount: b.size * 0.04 });
+      // freq 4 against uvScale 6 gave the wear cloud a wavelength of about a metre
+      // and a half of UV -- longer than the receiver, so the largest part of the
+      // weapon fell entirely inside one lobe of it and came out uniformly clean while
+      // the small parts got all the variation. Wear has to repeat several times
+      // across a hand-sized object to read as wear at all.
+      const wear = b.warp(b.fbm({ freq: 13, octaves: 4, seed: 12 }), { freq: 3, amount: b.size * 0.04 });
       const scratch = b.fbm({ freq: 80, freqY: 5, octaves: 2, seed: 3 });
       // 0x15171b was a reflectance of about 0.007. On a metal the albedo *is* F0,
       // so that is an order of magnitude below plastic's 0.04 and the surface
@@ -1267,7 +1272,12 @@ export const MATERIAL_RECIPES = {
     build(b) {
       const pores = b.cells({ freq: 46, jitter: 1, mode: 'f1', seed: 17 });
       const creases = b.warp(b.fbm({ freq: 7, freqY: 18, octaves: 4, seed: 5 }), { freq: 5, amount: b.size * 0.02 });
-      const blotch = b.fbm({ freq: 4, octaves: 4, seed: 55 });
+      // freq 4 is the same trap the gun's wear field fell into: on the forearm's UV
+      // area that wavelength spans the whole limb, so every large surface came out one
+      // flat chroma and a review called it a salmon tube. Skin's value variation --
+      // tan against pale, blood pooling, the pallor over a tendon -- repeats several
+      // times across a forearm.
+      const blotch = b.fbm({ freq: 11, octaves: 4, seed: 55 });
       const hair = b.fbm({ freq: 34, freqY: 34, octaves: 2, seed: 71 });
       // Soft tissue over bone: the swell of a thenar pad, the ground between the
       // tendons on the back of a hand. Deliberately isotropic, unlike every other
@@ -1304,7 +1314,9 @@ export const MATERIAL_RECIPES = {
         const line = smoothstep(0.66, 0.93, fold[i]);
         const swell = flesh[i] - 0.5;
         b.height[i] = 0.6 - pore * 0.16 - crease * 0.18 + swell * 0.3 - line * 0.2 + (hair[i] - 0.5) * 0.04;
-        let c = mixc(mid, pale, blotch[i] * 0.85);
+        // A second, slower value break on top of the fine one: a forearm is not one
+        // tone even where the fine detail is uniform.
+        let c = mixc(mid, pale, clamp01(blotch[i] * 0.7 + (flesh[i] - 0.5) * 0.8));
         // Blood sits close under a crease and in the fold over a knuckle, so those
         // go red before anything else on a hand does.
         c = mixc(c, red, clamp01(blotch[i] * 1.5 - 0.55) * 0.7 + crease * 0.3 + line * 0.3);

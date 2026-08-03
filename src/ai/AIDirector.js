@@ -87,12 +87,16 @@ const TURN_RATE = 5.2; // rad/s
 const SIGHT_RANGE = 85;
 const FOV_COS = -0.15; // ~99 degrees to either side; a soldier is not a camera
 
-const REACTION = 0.42; // seconds between seeing and being on target
-const SHOT_INTERVAL = 0.86; // deliberate aimed fire, not a hose
-const SPREAD = 0.045; // radians, cone half-angle before the per-enemy bias
+const REACTION = 1.1; // seconds between seeing and being on target
+const SHOT_INTERVAL = 1.15; // deliberate aimed fire, not a hose
+const SPREAD = 0.085; // radians, cone half-angle before the per-enemy bias
+const RANGING_SHOTS = 2; // opening rounds that deliberately go wide
+const RANGING_SPREAD = 3.2; // how much wider they go
 const SUPPRESS_TIME = 1.05;
 const LOS_GIVEUP = 3.0;
 const DEATH_TIME = 1.05;
+const REPOST_DELAY = 1.4; // seconds of total lost contact before the squad moves
+const REPOST_DISTANCE = 10; // how far the player must be from the wave's anchor
 
 /**
  * The AI's weapon. Damage is deliberately below the player's: `Ballistics`
@@ -101,7 +105,7 @@ const DEATH_TIME = 1.05;
  */
 const AI_WEAPON = {
   name: 'ak_pattern',
-  damage: 13,
+  damage: 9,
   falloff: { near: 18, far: 65, floor: 6 },
   headMultiplier: 1.5,
   limbMultiplier: 0.85,
@@ -170,8 +174,11 @@ export class AIDirector {
 
     this.rng = new Rng(0x5170e1);
     this._proto = null;
-    this._posts = null;
     this._tick = 0;
+    // Where the player was when the wave was committed, and how long the whole
+    // squad has been out of contact. Together they decide a repost.
+    this._anchor = new THREE.Vector3();
+    this._lostT = 0;
 
     // Scratch. Nothing in fixedUpdate/update below is allowed to allocate.
     this._v = new THREE.Vector3();
@@ -219,8 +226,9 @@ export class AIDirector {
    */
   spawnWave(n = 4) {
     if (!this._proto) return [];
-    const posts = this._posts ?? (this._posts = this._rankPosts());
+    const posts = this._pickPosts();
     if (!posts.length) return [];
+    this._lostT = 0;
 
     // Buddy pairs. Soldiers hold a position two-up, not one man every fifteen
     // metres, and a wave spread one deep across every post the ranking returned
@@ -251,62 +259,71 @@ export class AIDirector {
   }
 
   /**
-   * Score every enemy spawn by how well it covers the southern approach, and keep
-   * the best ones that are not on top of each other.
+   * The posts this wave should hold, chosen against the player.
    *
-   * Three terms. Line of sight to the corridor the player walks up, because a post
-   * that cannot see the approach is not defending it. Distance down that corridor,
-   * banded so a post at the player's feet or eighty metres away is not chosen over
-   * one at engagement range. And lateral offset from the corridor's axis, which is
-   * what separates a position fronting the square from one covering a side arcade.
+   * THIS WAS SCORED AGAINST THE MAP FIRST AND THAT WAS WRONG, ON EVIDENCE. Ranking
+   * the level's spawns by how well they cover the southern approach corridor is
+   * defensible doctrine and it produced a silhouette frame with no enemy anywhere
+   * in it — the posts that best covered the corridor were the ones off to the
+   * sides. A wave the player cannot see is not a wave; `spawnWave` means "put a
+   * squad in front of the player and let them fight it", which is what wave
+   * spawning means in every shooter that has it.
+   *
+   * So: three hard gates and two scores, all relative to the player.
+   *   - The post must be able to see them. A position that cannot shoot at the
+   *     player is not engaging them, and `segmentClear` against the BVH is the
+   *     same test the AI's own perception uses.
+   *   - It must be at fighting distance: not on top of the player, not across the
+   *     map.
+   *   - It must be ahead of them, inside a 63-degree half-cone. A squad that
+   *     materialises behind you is a cheap shot, and it is also invisible, which
+   *     for the pose that exists to grade enemy readability is the whole failure.
+   * Then alignment with the view axis dominates the range band, so the squad
+   * fronts the player rather than raking off to one flank.
    */
-  _rankPosts() {
-    const level = this.game.level;
+  _pickPosts() {
     const col = this.game.collision;
-    const spawns = level?.enemySpawns ?? [];
+    const spawns = this.game.level?.enemySpawns ?? [];
     if (!spawns.length) return [];
 
-    const start = level?.spawnPoints?.[0]?.position ?? new THREE.Vector3(0, 1.7, 20);
-    const corridor = [];
-    for (let i = 0; i <= 4; i++) {
-      const t = i / 4;
-      corridor.push(new THREE.Vector3(start.x * (1 - t), 1.55, start.z + (-8 - start.z) * t));
-    }
+    const p = this.game.player;
+    const ax = p ? p.position.x : 0;
+    const az = p ? p.position.z : 20;
+    const yaw = p ? p.yaw : 0;
+    const fx = -Math.sin(yaw);
+    const fz = -Math.cos(yaw);
+    this._anchor.set(ax, (p ? p.position.y : 0) + (p?.eyeHeight ?? 1.7) * 0.75, az);
 
-    const a = new THREE.Vector3();
+    const eye = this._v;
     const scored = [];
     for (const post of spawns) {
-      a.set(post.position.x, post.position.y + EYE, post.position.z);
-      let seen = 0;
-      if (col?.segmentClear) {
-        for (const c of corridor) if (col.segmentClear(a, c)) seen++;
-      } else {
-        seen = corridor.length;
-      }
-      if (seen === 0) continue; // covers nothing the player will walk through
-
-      const d = post.position.distanceTo(start);
-      const range = 1 - Math.min(1, Math.abs(d - 27) / 20);
-      const lateral = Math.min(1, Math.abs(post.position.x - start.x) / 18);
-      scored.push({ post, score: seen / corridor.length + range - lateral * 0.8 });
+      const dx = post.position.x - ax;
+      const dz = post.position.z - az;
+      const d = Math.hypot(dx, dz);
+      if (d < 6 || d > 45) continue;
+      const dot = (dx * fx + dz * fz) / d;
+      if (dot < 0.45) continue; // behind, or so far off the axis it is off-screen
+      eye.set(post.position.x, post.position.y + EYE, post.position.z);
+      if (col?.segmentClear && !col.segmentClear(eye, this._anchor)) continue;
+      scored.push({ post, score: dot * 2 + (1 - Math.min(1, Math.abs(d - 16) / 22)) });
     }
-    scored.sort((p, q) => q.score - p.score);
+    scored.sort((a, b) => b.score - a.score);
 
-    // Greedy spread. Two posts six metres apart are one post as far as the eye is
+    // Greedy spread. Two posts five metres apart are one post as far as the eye is
     // concerned, and stacking a wave into one corner wastes half of it.
     const kept = [];
     for (const s of scored) {
       let ok = true;
       for (const k of kept) {
-        if (k.position.distanceTo(s.post.position) < 6) {
+        if (k.position.distanceTo(s.post.position) < 5) {
           ok = false;
           break;
         }
       }
       if (ok) kept.push(s.post);
-      if (kept.length >= 5) break;
+      if (kept.length >= 4) break;
     }
-    return kept.length ? kept : spawns.slice(0, 4);
+    return kept;
   }
 
   /**
@@ -397,6 +414,7 @@ export class AIDirector {
       aimPitch: 0,
       weaponUp: 0,
       fireCd: REACTION + this.rng.range(0.15, 0.5),
+      shots: 0,
       walkPhase: this.rng.range(0, Math.PI * 2),
       speed: 0,
       deathT: 0,
@@ -481,10 +499,59 @@ export class AIDirector {
     this.game.bus?.emit?.('ai:alert', { position });
   }
 
+  /**
+   * A squad that has completely lost the player gets moved to posts that can see
+   * them again.
+   *
+   * This is what the word "director" in the class name is for, and it is the same
+   * off-screen relocation every wave-based shooter does. It is safe precisely
+   * because of the condition: it only fires when *no* living enemy has line of
+   * sight, and line of sight is near enough symmetric that if none of them can see
+   * the player, the player cannot see any of them either — so nothing visibly
+   * teleports. It also needs the player to have actually gone somewhere, which is
+   * what stops a squad that merely lost you behind a wall from abandoning cover.
+   */
+  _maybeRepost(player, dt) {
+    if (!player || player.alive === false) return;
+    let alive = 0;
+    for (const e of this.enemies) {
+      if (!e.alive) continue;
+      alive++;
+      if (e.hasLos) {
+        this._lostT = 0;
+        return;
+      }
+    }
+    if (!alive) return;
+    this._lostT += dt;
+    if (this._lostT < REPOST_DELAY) return;
+    if (this._anchor.distanceTo(player.position) < REPOST_DISTANCE) return;
+
+    const posts = this._pickPosts();
+    this._lostT = 0;
+    if (!posts.length) return;
+
+    const used = Math.min(posts.length, Math.max(1, Math.ceil(alive / 2)));
+    let i = 0;
+    for (const e of this.enemies) {
+      if (!e.alive) continue;
+      const post = posts[i % used];
+      e.post = post;
+      e.slot.copy(this._slotFor(post, Math.floor(i / used), i));
+      e.position.copy(e.slot);
+      e.target.copy(e.slot);
+      e.yaw = e.targetYaw = yawTo(e.position, player.position);
+      e.losLostT = 0;
+      this._setState(e, S.ALERT);
+      i++;
+    }
+  }
+
   fixedUpdate(dt) {
     if (!this.enemies.length) return;
     this._tick++;
     const player = this.game.player;
+    if (this._tick % THINK_STEPS === 0) this._maybeRepost(player, dt * THINK_STEPS);
 
     for (const e of this.enemies) {
       e.stateT += dt;
@@ -671,11 +738,20 @@ export class AIDirector {
     this._dir.copy(this._aim).sub(this._muzzle).normalize();
 
     // Cone about the aim axis: the fixed per-enemy bias plus a shot-to-shot term.
+    //
+    // The opening rounds go deliberately wide. Four riflemen who are all on target
+    // from the first trigger pull killed the player inside the silhouette pose's
+    // own four-second settle, which put a death banner across the frame the round
+    // exists to grade — and it is bad design besides. Real contact opens with fire
+    // in your direction and walks onto you; this is that, and it is also the
+    // difference between a firefight and an execution.
+    const ranging = e.shots < RANGING_SHOTS ? RANGING_SPREAD : 1;
+    e.shots++;
     const ax = -this._dir.z;
     const az = this._dir.x;
     const al = Math.hypot(ax, az) || 1;
-    const ox = e.biasX + this.rng.gauss() * SPREAD;
-    const oy = e.biasY + this.rng.gauss() * SPREAD;
+    const ox = (e.biasX + this.rng.gauss() * SPREAD) * ranging;
+    const oy = (e.biasY + this.rng.gauss() * SPREAD) * ranging;
     this._dir.x += (ax / al) * ox;
     this._dir.z += (az / al) * ox;
     this._dir.y += oy;

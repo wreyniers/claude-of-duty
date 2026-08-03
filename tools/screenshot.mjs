@@ -90,6 +90,28 @@ const SHOTS = [
   },
 ];
 
+/**
+ * Refuse to run against a server this process did not start.
+ *
+ * Hot reload is off for harness runs, so a vite that survives a killed run keeps
+ * serving the module graph it transformed when it started -- for ever. A later run
+ * on the same port then finds a healthy server, proceeds, and silently grades code
+ * that no longer exists on disk. That happened, and it is worse than a crash:
+ * every measurement is real, reproducible, and about the wrong build.
+ */
+async function assertPortFree(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(1500) });
+    if (!res.ok) return;
+  } catch {
+    return; // nothing listening, which is what we want
+  }
+  throw new Error(
+    `port ${port} is already serving. A leaked dev server would silently serve a stale ` +
+      `module graph, so this run refuses to start. Kill it, or pass a different --port.`
+  );
+}
+
 async function waitForServer(url, timeoutMs = 60000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -172,6 +194,7 @@ async function main() {
 
   const dist = path.join(ROOT, 'dist');
   const useBuild = existsSync(path.join(dist, 'index.html')) && process.argv.includes('--dist');
+  await assertPortFree(PORT);
   const server = spawn(
     'npx',
     useBuild

@@ -105,6 +105,23 @@ const SKY_MIX = 0.52;
 const KEY_BOOST = 3.3;
 
 /**
+ * The recipes whose look depends on a view-dependent highlight, by name.
+ *
+ * Named explicitly because there is no reliable way to ask a material: ORM packing
+ * keeps `metalness` at 1 as a multiplier over the packed map, so every recipe in
+ * the level reports 1 and no threshold can separate steel from brick.
+ */
+const METAL_RECIPES = new Set([
+  'steel_brushed',
+  'steel_rusted',
+  'iron_painted_chipped',
+  'aluminium_scuffed',
+  'corrugated_metal',
+  'gun_steel_blued',
+  'gun_aluminium_anodized',
+]);
+
+/**
  * Sun, cascaded shadow maps, and the local light budget.
  *
  * CONTRACT:
@@ -674,6 +691,13 @@ export class Lighting {
    * identity depends on a highlight, and because they cover little enough of the
    * screen that returning them to their authored value cannot re-inflate the
    * overall fill the way freeing every dielectric would.
+   *
+   * The list is by name and not by `material.metalness`, which cannot be used for
+   * this: ORM packing leaves the scalar at 1 as a multiplier over the metalness
+   * map, exactly as it does for roughness, so concrete, asphalt and brick all
+   * report metalness 1 and a `> 0.5` test frees the entire level. Measured that
+   * way round first — the whole scene came back bound, which is a scene-wide fill
+   * rise of 1.6 to 2.3x dressed up as a specular fix.
    */
   _bindMetalEnv() {
     const env = this.game.scene.environment;
@@ -682,7 +706,7 @@ export class Lighting {
     const cache = this.game.forge?._materials;
     if (!cache) return;
     for (const m of new Set(cache.values())) {
-      if (m.isMeshStandardMaterial && m.envMap === null && m.metalness > 0.5) {
+      if (m.isMeshStandardMaterial && m.envMap === null && METAL_RECIPES.has(m.name)) {
         m.envMap = env;
         m.needsUpdate = true;
       }
